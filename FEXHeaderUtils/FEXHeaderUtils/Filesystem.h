@@ -9,11 +9,13 @@
 #include <fcntl.h>
 #include <memory_resource>
 #include <string_view>
-#ifndef _WIN32
+#if defined(_WIN32)
+#include <filesystem>
+#elif defined(__APPLE__)
+#include <sys/syslimits.h> // PATH_MAX
+#else
 #include <linux/limits.h>
 #include <sys/sendfile.h>
-#else
-#include <filesystem>
 #endif
 #include <sys/stat.h>
 #include <unistd.h>
@@ -216,7 +218,30 @@ inline bool CopyFile(const fextl::string& From, const fextl::string& To, CopyOpt
       close(SourceFD);
       return false;
     }
+#ifdef __APPLE__
+    // Darwin's sendfile() is socket-oriented (needs a socket fd on one side), not a general
+    // file-to-file copy primitive like Linux's - fall back to a plain read/write loop.
+    bool Result = true;
+    char CopyBuffer[64 * 1024];
+    ssize_t BytesRead;
+    while ((BytesRead = read(SourceFD, CopyBuffer, sizeof(CopyBuffer))) > 0) {
+      ssize_t Written = 0;
+      while (Written < BytesRead) {
+        ssize_t Chunk = write(DestinationFD, CopyBuffer + Written, BytesRead - Written);
+        if (Chunk <= 0) {
+          Result = false;
+          break;
+        }
+        Written += Chunk;
+      }
+      if (!Result) {
+        break;
+      }
+    }
+    Result = Result && BytesRead == 0;
+#else
     bool Result = sendfile(DestinationFD, SourceFD, nullptr, buf.st_size) == buf.st_size;
+#endif
     close(DestinationFD);
     close(SourceFD);
     return Result;

@@ -256,6 +256,11 @@ fextl::vector<MemoryRegion> StealMemoryRegion(uintptr_t Begin, uintptr_t End) {
   for (auto RegionIt = Regions.begin(); RegionIt != Regions.end(); ++RegionIt) {
     auto Alloc = ::mmap(RegionIt->Ptr, RegionIt->Size, PROT_NONE, MAP_ANONYMOUS | MAP_NORESERVE | MAP_PRIVATE | MAP_FIXED_NOREPLACE, -1, 0);
 
+#ifdef __APPLE__
+    // Darwin has no MADV_DONTDUMP equivalent; core dumps of large unmapped regions are a
+    // debugging-convenience concern only, so just leave SupportsDontDump false.
+    SupportsDontDump = false;
+#else
     if (SupportsDontDump) {
       // Mark these regions as don't dump so that coredump doesn't try dumping large unmapped regions.
       // Ideally coredump would be smart enough to only dump resident pages, but here we are.
@@ -264,6 +269,7 @@ fextl::vector<MemoryRegion> StealMemoryRegion(uintptr_t Begin, uintptr_t End) {
         SupportsDontDump = false;
       }
     }
+#endif
 
     LogMan::Throw::AFmt(Alloc != MAP_FAILED, "StealMemoryRegion: mmap({}, {:x}) failed: {}", fmt::ptr(RegionIt->Ptr), RegionIt->Size, errno);
     LogMan::Throw::AFmt(Alloc == RegionIt->Ptr, "mmap returned {} instead of {}", Alloc, fmt::ptr(RegionIt->Ptr));

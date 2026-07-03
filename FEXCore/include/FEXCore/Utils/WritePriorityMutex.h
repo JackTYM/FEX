@@ -3,9 +3,11 @@
 #include <atomic>
 #include <cstdint>
 
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__APPLE__)
 #include <linux/futex.h> /* Definition of FUTEX_* constants */
 #include <sys/syscall.h> /* Definition of SYS_* constants */
+#include <unistd.h>
+#elif defined(__APPLE__)
 #include <unistd.h>
 #else
 #include <synchapi.h>
@@ -270,7 +272,7 @@ public:
 
 private:
 
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__APPLE__)
   void FutexWaitForWriteAvailable(uint32_t Expected) {
     ::syscall(SYS_futex, &Futex, FUTEX_PRIVATE_FLAG | FUTEX_WAIT_BITSET, Expected, nullptr, nullptr, FUTEX_BITSET_WAIT_WRITERS);
   }
@@ -291,6 +293,26 @@ private:
   void FutexWakeReaders() {
     // Wake all readers.
     ::syscall(SYS_futex, &Futex, FUTEX_PRIVATE_FLAG | FUTEX_WAKE_BITSET, INT_MAX, nullptr, nullptr, FUTEX_BITSET_WAIT_READERS);
+  }
+#elif defined(__APPLE__)
+  // Darwin has no futex syscall. std::atomic_ref::wait/notify (C++20) provides the same
+  // block-until-value-changes/wake primitive, just without FUTEX_WAIT_BITSET's ability to filter
+  // which waiters wake up - readers and writers may see extra spurious wakeups here, which is
+  // harmless since every caller already loops and rechecks the futex value after waking.
+  void FutexWaitForWriteAvailable(uint32_t Expected) {
+    std::atomic_ref<uint32_t>(Futex).wait(Expected, std::memory_order_relaxed);
+  }
+
+  void FutexWaitForReadAvailable(uint32_t Expected) {
+    std::atomic_ref<uint32_t>(Futex).wait(Expected, std::memory_order_relaxed);
+  }
+
+  void FutexWakeWriter() {
+    std::atomic_ref<uint32_t>(Futex).notify_one();
+  }
+
+  void FutexWakeReaders() {
+    std::atomic_ref<uint32_t>(Futex).notify_all();
   }
 #else
   // Writers wait for the full 32-bit futex.

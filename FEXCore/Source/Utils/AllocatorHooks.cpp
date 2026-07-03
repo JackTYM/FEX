@@ -10,8 +10,13 @@
 #endif
 #endif
 
+#include <algorithm>
 #include <cstdint>
+#ifdef __APPLE__
+#include <malloc/malloc.h>
+#else
 #include <malloc.h>
+#endif
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -188,13 +193,38 @@ void* calloc(size_t n, size_t size) {
   return ::calloc(n, size);
 }
 void* memalign(size_t align, size_t s) {
+#ifdef __APPLE__
+  // Darwin's libc doesn't expose a free-function memalign(); go through posix_memalign instead.
+  // posix_memalign (like aligned_alloc below) requires alignment >= sizeof(void*) and fails
+  // outright for smaller powers of two (e.g. 4), unlike glibc's more permissive memalign/
+  // aligned_alloc - callers requesting a smaller alignment than malloc already guarantees get
+  // clamped up rather than silently receiving a null pointer nothing downstream checks for.
+  void* ptr = nullptr;
+  if (::posix_memalign(&ptr, (std::max)(align, sizeof(void*)), s) != 0) {
+    return nullptr;
+  }
+  return ptr;
+#else
   return ::memalign(align, s);
+#endif
 }
 void* valloc(size_t size) {
+#ifdef __APPLE__
+  void* ptr = nullptr;
+  if (::posix_memalign(&ptr, static_cast<size_t>(::getpagesize()), size) != 0) {
+    return nullptr;
+  }
+  return ptr;
+#else
   return ::valloc(size);
+#endif
 }
 int posix_memalign(void** r, size_t a, size_t s) {
+#ifdef __APPLE__
+  return ::posix_memalign(r, (std::max)(a, sizeof(void*)), s);
+#else
   return ::posix_memalign(r, a, s);
+#endif
 }
 void* realloc(void* ptr, size_t size) {
   return ::realloc(ptr, size);
@@ -203,10 +233,27 @@ void free(void* ptr) {
   return ::free(ptr);
 }
 size_t malloc_usable_size(void* ptr) {
+#ifdef __APPLE__
+  return ::malloc_size(ptr);
+#else
   return ::malloc_usable_size(ptr);
+#endif
 }
 void* aligned_alloc(size_t a, size_t s) {
+#ifdef __APPLE__
+  // Darwin's aligned_alloc has two stricter requirements than glibc's:
+  //  1. alignment must be >= sizeof(void*) (many FEXCore types have small alignof(), e.g. 1 or 4).
+  //  2. size must be an exact multiple of alignment (glibc tolerates any size).
+  // FEXAlloc<T>::allocate() calls this for every internal fextl container/make_unique with
+  // whatever (alignof(T), n*sizeof(T)) the type naturally has, so both need correcting here:
+  // clamp alignment up, then round size up to a multiple of the (possibly larger) alignment.
+  // The extra tail bytes are harmless slack; free() doesn't need to know the original size.
+  const size_t ClampedAlign = (std::max)(a, sizeof(void*));
+  const size_t RoundedSize = ((s + ClampedAlign - 1) / ClampedAlign) * ClampedAlign;
+  return ::aligned_alloc(ClampedAlign, RoundedSize);
+#else
   return ::aligned_alloc(a, s);
+#endif
 }
 void aligned_free(void* ptr) {
   return ::free(ptr);

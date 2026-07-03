@@ -5,7 +5,7 @@ tags: backend|arm64
 $end_info$
 */
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
 #include <syscall.h>
 #endif
 
@@ -234,9 +234,12 @@ DEF_OP(ProcessorID) {
     mrs(GetReg(Node), ARMEmitter::SystemRegister::TPIDRRO_EL0);
     return;
   }
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
   else {
-    // If on Windows and TPIDRRO isn't supported (like in wine), then this is a programming error.
+    // If TPIDRRO isn't supported (like in wine, or here on Apple), then this is a programming
+    // error. The Linux fallback below emits a raw `svc(0)` trap with a hardcoded Linux getcpu
+    // syscall number, which has no Darwin equivalent (different syscall ABI entirely) - so Apple
+    // follows the same precedent Windows already set rather than guessing at a Darwin syscall path.
     ERROR_AND_DIE_FMT("Unsupported");
   }
 #else

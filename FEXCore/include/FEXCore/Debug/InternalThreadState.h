@@ -87,7 +87,7 @@ struct UnalignedExclusiveStore {
   uint8_t Size;
 };
 
-struct alignas(FEXCore::Utils::FEX_PAGE_SIZE) InternalThreadState : public FEXCore::Allocator::FEXAllocOperators {
+struct alignas(FEXCore::Utils::FEX_HOST_PAGE_SIZE) InternalThreadState : public FEXCore::Allocator::FEXAllocOperators {
   FEXCore::Core::CpuStateFrame* const CurrentFrame = &BaseFrameState;
 
   FEXCore::Context::Context* const CTX;
@@ -121,8 +121,13 @@ struct alignas(FEXCore::Utils::FEX_PAGE_SIZE) InternalThreadState : public FEXCo
   // BaseFrameState should always be at the end, directly before the interrupt fault page
   FEXCore::Core::CpuStateFrame BaseFrameState {};
 
-  // Can be reprotected as RO to trigger an interrupt at generated code block entrypoints
-  alignas(FEXCore::Utils::FEX_PAGE_SIZE) uint8_t InterruptFaultPage[FEXCore::Utils::FEX_PAGE_SIZE];
+  // Can be reprotected as RO to trigger an interrupt at generated code block entrypoints.
+  // Sized/aligned to the host's real mprotect() granularity (FEX_HOST_PAGE_SIZE), not the guest's
+  // FEX_PAGE_SIZE: on a 16KB-host (Apple Silicon), a 4KB-sized/aligned region here either fails
+  // mprotect (unaligned start address) or, if it happened to be aligned, would leave 12KB of the
+  // same host page at the old protection - the field must occupy a full host page by itself so
+  // reprotecting it can never affect adjacent unrelated memory in this allocation.
+  alignas(FEXCore::Utils::FEX_HOST_PAGE_SIZE) uint8_t InterruptFaultPage[FEXCore::Utils::FEX_HOST_PAGE_SIZE];
 };
 static_assert(std::is_standard_layout_v<FEXCore::Core::InternalThreadState>);
 // Maximum unsigned-offset store range for fault page.

@@ -7,10 +7,14 @@
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
-#ifndef _WIN32
-#include <syscall.h>
-#else
+#if defined(_WIN32)
 #include <processthreadsapi.h>
+#elif defined(__APPLE__)
+#include <cerrno>
+#include <pthread.h>
+#include <signal.h>
+#else
+#include <syscall.h>
 #endif
 #include <sys/stat.h>
 #include <unistd.h>
@@ -51,7 +55,7 @@ namespace FHU::Syscalls {
 #define SYS_pidfd_open 434
 #endif
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
 inline int32_t getcpu(uint32_t* cpu, uint32_t* node) {
   // Third argument is unused
 #if defined(HAS_SYSCALL_GETCPU) && HAS_SYSCALL_GETCPU
@@ -95,6 +99,47 @@ inline int32_t renameat2(int olddirfd, const char* oldpath, int newdirfd, const 
 
 inline int32_t pidfd_open(pid_t pid, unsigned int flags) {
   return ::syscall(SYS_pidfd_open, pid, flags);
+}
+#elif defined(__APPLE__)
+// Darwin has none of these Linux syscalls. getcpu/gettid are actually called from FEXCore
+// (CPUID.cpp, Dispatcher.cpp) and get real implementations; tgkill/statx/renameat2/pidfd_open
+// have no FEXCore caller today (verified: only referenced from this header) and get best-effort
+// stand-ins so the header compiles - revisit if a real caller shows up.
+inline int32_t getcpu(uint32_t* cpu, uint32_t* node) {
+  // No per-core id API on Darwin; report a single logical CPU.
+  if (cpu) {
+    *cpu = 0;
+  }
+  if (node) {
+    *node = 0;
+  }
+  return 0;
+}
+
+inline int32_t gettid() {
+  uint64_t Tid {};
+  ::pthread_threadid_np(nullptr, &Tid);
+  return static_cast<int32_t>(Tid);
+}
+
+inline int32_t tgkill(pid_t tgid, pid_t /*tid*/, int sig) {
+  // Darwin has no per-thread tgkill; approximate with a process-directed signal.
+  return ::kill(tgid, sig);
+}
+
+inline int32_t statx(int /*dirfd*/, const char* /*pathname*/, int32_t /*flags*/, uint32_t /*mask*/, void* /*statxbuf*/) {
+  errno = ENOSYS;
+  return -1;
+}
+
+inline int32_t renameat2(int olddirfd, const char* oldpath, int newdirfd, const char* newpath, unsigned int /*flags*/) {
+  // Darwin's renameat has no NOREPLACE/EXCHANGE equivalent; approximate by ignoring flags.
+  return ::renameat(olddirfd, oldpath, newdirfd, newpath);
+}
+
+inline int32_t pidfd_open(pid_t /*pid*/, unsigned int /*flags*/) {
+  errno = ENOSYS;
+  return -1;
 }
 #else
 

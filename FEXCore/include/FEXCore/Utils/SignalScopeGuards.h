@@ -158,7 +158,17 @@ public:
   explicit ScopedSignalMasker(uint64_t Mask)
     : OriginalMask(0) {
     // Mask all signals, storing the original incoming mask
+#ifdef __APPLE__
+    // Darwin's sigset_t is a plain 32-bit signal bitmask (no realtime signals), unlike Linux's
+    // opaque glibc sigset_t - the low 32 bits of Mask map directly, so sigprocmask() works in
+    // place of the raw rt_sigprocmask syscall FEX uses on Linux to get at the full 64-bit mask.
+    auto MaskSet = static_cast<sigset_t>(Mask);
+    sigset_t OldSet {};
+    ::sigprocmask(SIG_SETMASK, &MaskSet, &OldSet);
+    *OriginalMask = OldSet;
+#else
     ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &Mask, &*OriginalMask, sizeof(*OriginalMask));
+#endif
   }
 
   // Move-only type
@@ -171,7 +181,12 @@ public:
 
   ~ScopedSignalMasker() {
     if (OriginalMask) {
+#ifdef __APPLE__
+      auto MaskSet = static_cast<sigset_t>(*OriginalMask);
+      ::sigprocmask(SIG_SETMASK, &MaskSet, nullptr);
+#else
       ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &OriginalMask, nullptr, sizeof(*OriginalMask));
+#endif
     }
   }
 private:

@@ -507,8 +507,11 @@ void OSAllocator_64Bit::AllocateMemoryRegions(fextl::vector<FEXCore::Allocator::
     // Allocate up to 64 MiB the first allocation for an intrusive allocator
     mprotect(it.Ptr, ObjectAllocSize, PROT_READ | PROT_WRITE);
 
-    // This enables the kernel to use transparent large pages in the allocator which can reduce memory pressure
+#ifndef __APPLE__
+    // This enables the kernel to use transparent large pages in the allocator which can reduce memory pressure.
+    // Darwin has no per-mapping THP hint; the VM system manages this itself (see also VirtualTHPControl).
     ::madvise(it.Ptr, ObjectAllocSize, MADV_HUGEPAGE);
+#endif
 
     FEXCore::Allocator::VirtualName("FEXMem_Misc", reinterpret_cast<void*>(it.Ptr), ObjectAllocSize);
 

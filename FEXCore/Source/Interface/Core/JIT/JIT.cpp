@@ -25,6 +25,7 @@ $end_info$
 #include <FEXCore/Core/X86Enums.h>
 #include <FEXCore/Debug/InternalThreadState.h>
 #include <FEXCore/Utils/Allocator.h>
+#include <FEXCore/Utils/AllocatorHooks.h>
 #include <FEXCore/Utils/CompilerDefs.h>
 #include <FEXCore/Utils/EnumUtils.h>
 #include <FEXCore/Utils/LogManager.h>
@@ -677,6 +678,9 @@ void Arm64JITCore::EmitDetectionString() {
 }
 
 void Arm64JITCore::ClearCache() {
+#ifdef __APPLE__
+  FEXCore::Allocator::JITWriteScope JITWrite;
+#endif
   // NOTE: Holding on to the reference here is required to ensure validity of the WriteLock mutex
   auto PrevCodeBuffer = CurrentCodeBuffer;
   auto lk = PrevCodeBuffer->LookupCache->AcquireWriteLock();
@@ -825,6 +829,9 @@ void Arm64JITCore::EmitEntryPoint(ARMEmitter::BackwardLabel& HeaderLabel, bool C
 CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size, bool SingleInst, const FEXCore::IR::IRListView* IR,
                                                    FEXCore::Core::DebugData* DebugData, bool CheckTF) {
   FEXCORE_PROFILE_SCOPED("Arm64::CompileCode");
+#ifdef __APPLE__
+  FEXCore::Allocator::JITWriteScope JITWrite;
+#endif
 
   const auto PrevNumAllocations = Relocations.size();
 

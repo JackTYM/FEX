@@ -278,7 +278,14 @@ function(AddLibrary Name Type)
 
   # During generation of the import library (dll.a), MinGW needs some extra symbols from libraries
   # such as fmt, which are propagated by FEXCore_Base. Wonderful.
-  if (MINGW)
+  #
+  # Darwin's ld64 needs the same treatment for a different reason: unlike Linux's ELF linker,
+  # which allows a .so to have undefined symbols at link time (resolved later at load time),
+  # ld64 requires every symbol a Mach-O dylib references to be resolved when the dylib itself is
+  # linked. Since $<TARGET_OBJECTS:...> only embeds object files (not FEXCore_Base's transitively
+  # PUBLIC-linked libs like cephes_128bit/softfloat_3e), those symbols (e.g. extF80_* soft-float
+  # routines) go unresolved on Darwin without this.
+  if (MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     target_link_libraries(${Name} PRIVATE FEXCore_Base)
   endif()
   AddDefaultOptionsToTarget(${Name})

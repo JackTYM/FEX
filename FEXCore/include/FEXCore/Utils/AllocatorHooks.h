@@ -6,7 +6,12 @@
 
 #ifndef _WIN32
 #include <stdlib.h>
+#ifdef __APPLE__
+#include <malloc/malloc.h>
+#include <pthread.h>
+#else
 #include <malloc.h>
+#endif
 #include <sys/mman.h>
 #else
 #define NTDDI_VERSION 0x0A000005
@@ -112,13 +117,51 @@ FEX_DEFAULT_VISIBILITY extern void VirtualName(const char* Name, void* Ptr, size
 
 // All commit parameters are ignored here, they are unnecessary as Linux supports overcommit
 
+#ifdef __APPLE__
+// Apple's hardened runtime forbids RWX mappings outright: executable anonymous memory must be
+// requested with MAP_JIT, and even then a thread may only write to it while that thread's JIT
+// write-protection is explicitly disabled (see JITWriteScope below) - RWX from mmap() alone
+// (what the generic path below does on Linux) is rejected.
+inline int MapJitFlagIfExecutable(bool Execute) {
+  return Execute ? MAP_JIT : 0;
+}
+#endif
+
 inline void* VirtualAlloc(size_t Size, bool Execute = false, bool Commit = true) {
+#ifdef __APPLE__
+  return FEXCore::Allocator::mmap(nullptr, Size, PROT_READ | PROT_WRITE | (Execute ? PROT_EXEC : 0),
+                                  MAP_PRIVATE | MAP_ANONYMOUS | MapJitFlagIfExecutable(Execute), -1, 0);
+#else
   return FEXCore::Allocator::mmap(nullptr, Size, PROT_READ | PROT_WRITE | (Execute ? PROT_EXEC : 0), MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+#endif
 }
 
 inline void* VirtualAlloc(void* Base, size_t Size, bool Execute = false, bool Commit = true) {
+#ifdef __APPLE__
+  return FEXCore::Allocator::mmap(Base, Size, PROT_READ | PROT_WRITE | (Execute ? PROT_EXEC : 0),
+                                  MAP_PRIVATE | MAP_ANONYMOUS | MapJitFlagIfExecutable(Execute), -1, 0);
+#else
   return FEXCore::Allocator::mmap(Base, Size, PROT_READ | PROT_WRITE | (Execute ? PROT_EXEC : 0), MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+#endif
 }
+
+#ifdef __APPLE__
+// Toggles the calling thread's JIT write-protection (Apple Silicon's W^X enforcement is
+// per-thread, not per-mapping): writable-and-not-executable while `false`, executable-and-not-
+// writable while `true`. Must bracket any code that writes into a MAP_JIT region - wrap the
+// coarse "compile one block" / "emit one stub" boundary, not individual instruction emits, since
+// toggling has real per-call overhead.
+struct JITWriteScope {
+  JITWriteScope() {
+    ::pthread_jit_write_protect_np(0);
+  }
+  ~JITWriteScope() {
+    ::pthread_jit_write_protect_np(1);
+  }
+  JITWriteScope(const JITWriteScope&) = delete;
+  JITWriteScope& operator=(const JITWriteScope&) = delete;
+};
+#endif
 
 inline void VirtualFree(void* Ptr, size_t Size) {
   FEXCore::Allocator::munmap(Ptr, Size);
@@ -142,7 +185,14 @@ inline bool VirtualProtect(void* Ptr, size_t Size, ProtectOptions options) {
 }
 
 inline void VirtualTHPControl(const void* Ptr, size_t Size, THPControl Control) {
+#ifdef __APPLE__
+  // Darwin has no per-mapping transparent-huge-page madvise hint; the VM system manages this itself.
+  (void)Ptr;
+  (void)Size;
+  (void)Control;
+#else
   ::madvise(const_cast<void*>(Ptr), Size, Control == THPControl::Enable ? MADV_HUGEPAGE : MADV_NOHUGEPAGE);
+#endif
 }
 
 #endif

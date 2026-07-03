@@ -245,7 +245,10 @@ void CodeMapWriter::AppendData(std::span<const std::byte> Data) {
     }
     if (!IsResponsibleForFlush) {
       // Wait for the buffer to be flushed on the responsible thread
-      Utils::SpinWaitLock::WaitPred<std::less_equal<>, size_t>(reinterpret_cast<size_t*>(&BufferOffset), Buffer.size());
+      // uint64_t (not size_t) to match SpinWaitLock's fixed-width overloads: on Darwin arm64,
+      // uint64_t is `unsigned long long` while size_t is `unsigned long` - distinct types despite
+      // being the same width, unlike Linux arm64 where they're the same type.
+      Utils::SpinWaitLock::WaitPred<std::less_equal<>, uint64_t>(reinterpret_cast<uint64_t*>(&BufferOffset), Buffer.size());
     }
     AppendData(Data);
     return;
@@ -825,7 +828,7 @@ void CodeCache::FinalizeCodePages(MappedCodeCacheFile& Code, std::span<std::byte
 
   FEXCORE_PROFILE_SCOPED("FinalizeCodePages");
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
   // Atomicity is critical when making the finalized code data visible.
   // We ensure this by remapping a temporary buffer onto the PROT_NONE
   // placeholder page in CodeBuffer. Some constraints to keep in mind are:
@@ -869,7 +872,8 @@ void CodeCache::FinalizeCodePages(MappedCodeCacheFile& Code, std::span<std::byte
   // Release resident file pages that will no longer be needed. The VA range is left allocated to allow cleanup with a single VirtualFree.
   Allocator::VirtualDontNeed(Code.CodeBufferInFile.data() + StartOffset, Size);
 #else
-  // TODO: Implement lazy mapping on Windows
+  // TODO: Implement lazy mapping on Windows and Apple (Darwin has no mremap; a real fix would use
+  // mach_vm_remap for the same atomic-swap trick, mirroring the Windows TODO below).
   for (size_t i = StartPage; i < EndPage; ++i) {
     auto PageRelocations = SpanPageRelocations(Code, i);
     (void)ApplyCodeRelocations(Code.GuestBase, Code.CodeBuffer, PageRelocations, 0, false);

@@ -13,6 +13,7 @@
 #include <FEXCore/Core/X86Enums.h>
 #include <FEXCore/Debug/InternalThreadState.h>
 #include <FEXCore/HLE/SyscallHandler.h>
+#include <FEXCore/Utils/AllocatorHooks.h>
 #include <FEXCore/Utils/Event.h>
 #include <FEXCore/Utils/LogManager.h>
 #include <FEXCore/Utils/MathUtils.h>
@@ -52,6 +53,9 @@ Dispatcher::~Dispatcher() {
 }
 
 void Dispatcher::EmitDispatcher() {
+#ifdef __APPLE__
+  FEXCore::Allocator::JITWriteScope JITWrite;
+#endif
   // Don't modify TMP3 since it contains our RIP once the block doesn't exist
   auto RipReg = TMP3;
 #ifdef VIXL_DISASSEMBLER

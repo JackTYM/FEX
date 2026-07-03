@@ -3,8 +3,21 @@
 
 #ifndef _WIN32
 #include <sys/mman.h>
+#ifdef __APPLE__
+#include <cerrno>
+// Darwin has no prctl() at all. All call sites (CPUBackend.cpp's MDWE query, Allocator.cpp's VMA
+// naming) already treat a -1 return as "unsupported by this kernel" and degrade gracefully, so a
+// single shim here covers every caller without touching them individually. Real prctl() is
+// variadic (arg types vary by call site, e.g. void*/const char* for PR_SET_VMA), so this must be
+// too rather than fixing argument types that wouldn't match every caller.
+inline int prctl(int /*option*/, ...) {
+  errno = ENOSYS;
+  return -1;
+}
+#else
 #include <sys/user.h>
 #include <sys/prctl.h>
+#endif
 
 #ifndef PR_SET_VMA
 #define PR_SET_VMA 0x53564d41

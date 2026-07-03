@@ -11,7 +11,7 @@
 
 #include <cstdint>
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
 #include <sys/prctl.h>
 #endif
 
@@ -353,9 +353,14 @@ namespace CPU {
     Ptr = static_cast<uint8_t*>(FEXCore::Allocator::VirtualAlloc(Size, true));
     LOGMAN_THROW_A_FMT(!!Ptr, "Couldn't allocate code buffer");
 
-    // Protect the last page of the allocated buffer to trigger SIGSEGV on write access
-    uintptr_t LastPageAddr = AlignDown(reinterpret_cast<uintptr_t>(Ptr) + Size - 1, FEXCore::Utils::FEX_PAGE_SIZE);
-    if (!FEXCore::Allocator::VirtualProtect(reinterpret_cast<void*>(LastPageAddr), FEXCore::Utils::FEX_PAGE_SIZE,
+    // Protect the last page of the allocated buffer to trigger SIGSEGV on write access.
+    // Uses FEX_HOST_PAGE_SIZE (not FEX_PAGE_SIZE): the whole Size-byte region is one contiguous
+    // allocation, so its last real host page belongs to it entirely regardless of host page size,
+    // but the protect call must use the host's actual mprotect granularity (16KB on Apple Silicon)
+    // for both the alignment and the length, or it either fails (unaligned address) or under-
+    // protects (only 4KB of a 16KB host page marked PROT_NONE).
+    uintptr_t LastPageAddr = AlignDown(reinterpret_cast<uintptr_t>(Ptr) + Size - 1, FEXCore::Utils::FEX_HOST_PAGE_SIZE);
+    if (!FEXCore::Allocator::VirtualProtect(reinterpret_cast<void*>(LastPageAddr), FEXCore::Utils::FEX_HOST_PAGE_SIZE,
                                             FEXCore::Allocator::ProtectOptions::None)) {
       LogMan::Msg::EFmt("Failed to mprotect last page of code buffer.");
     }
