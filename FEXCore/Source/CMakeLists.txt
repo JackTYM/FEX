@@ -285,9 +285,19 @@ function(AddLibrary Name Type)
   # linked. Since $<TARGET_OBJECTS:...> only embeds object files (not FEXCore_Base's transitively
   # PUBLIC-linked libs like cephes_128bit/softfloat_3e), those symbols (e.g. extF80_* soft-float
   # routines) go unresolved on Darwin without this.
-  if (MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    target_link_libraries(${Name} PRIVATE FEXCore_Base)
-  endif()
+  #
+  # This is unconditional (not MinGW/Darwin-only) because the underlying gap applies everywhere:
+  # $<TARGET_OBJECTS:${PROJECT_NAME}_object> never pulls in FEXCore_Base's own object files (e.g.
+  # LogManager.cpp, Config.cpp) regardless of platform - only symbols FEXCore_object's compiled
+  # code actually references get archive-extracted into them. Public API-surface symbols meant
+  # purely for embedders to call (LogMan::Msg/Throw::InstallHandler, FEXCore::Config::Set,
+  # FEXCore::Allocator::mmap/munmap) are never referenced by FEXCore's own internal code, so they
+  # never get extracted from FEXCore_Base/JemallocLibs into FEXCore_shared's link on Linux either -
+  # ELF just tolerates the resulting undefined symbols in libFEXCore.so itself (only surfacing when
+  # a strict consumer linking with -Wl,--no-undefined, like this project's own fex-emulator target,
+  # links against it directly). Re-linking FEXCore_Base here is a no-op for the STATIC Type (static
+  # archives don't resolve symbols at creation time; it only records a usage requirement).
+  target_link_libraries(${Name} PRIVATE FEXCore_Base)
   AddDefaultOptionsToTarget(${Name})
 endfunction()
 
