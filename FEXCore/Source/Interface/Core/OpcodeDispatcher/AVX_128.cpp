@@ -356,7 +356,7 @@ void OpDispatchBuilder::AVX128_MOVVectorNT(OpcodeArgs) {
   if (Op->Dest.IsGPR()) {
     ///< MOVNTDQA load non-temporal comes from SSE4.1 and is extended by AVX/AVX2.
     RefPair Src {};
-    Ref SrcAddr = LoadSourceGPR(Op, Op->Src[0], Op->Flags, {.LoadData = false});
+    Ref SrcAddr = ApplyGuestMemoryRebase(LoadSourceGPR(Op, Op->Src[0], Op->Flags, {.LoadData = false}));
     Src.Low = _VLoadNonTemporal(OpSize::i128Bit, SrcAddr, 0);
 
     if (Is128Bit) {
@@ -367,7 +367,7 @@ void OpDispatchBuilder::AVX128_MOVVectorNT(OpcodeArgs) {
     AVX128_StoreResult_WithOpSize(Op, Op->Dest, Src);
   } else {
     auto Src = AVX128_LoadSource_WithOpSize(Op, Op->Src[0], Op->Flags, !Is128Bit, MemoryAccessType::STREAM);
-    Ref Dest = LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false});
+    Ref Dest = ApplyGuestMemoryRebase(LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false}));
 
     if (Is128Bit) {
       // Single store non-temporal for 128-bit operations.
@@ -409,7 +409,7 @@ void OpDispatchBuilder::AVX128_VMOVLP(OpcodeArgs) {
     ///< VMOVLPS/PD xmm1, xmm2, mem64
     // Bits[63:0] come from Src2[63:0]
     // Bits[127:64] come from Src1[127:64]
-    auto Src2 = MakeSegmentAddress(Op, Op->Src[1]);
+    auto Src2 = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Src[1]));
     Ref Result_Low = _VLoadVectorElement(OpSize::i128Bit, OpSize::i64Bit, Src1.Low, 0, Src2);
     Ref ZeroVector = LoadZeroVector(OpSize::i128Bit);
 
@@ -431,11 +431,11 @@ void OpDispatchBuilder::AVX128_VMOVHP(OpcodeArgs) {
   if (!Op->Dest.IsGPR()) {
     ///< VMOVHPS/PD mem64, xmm1
     // Need to store Bits[127:64]. Use a vector element store.
-    auto Dest = MakeSegmentAddress(Op, Op->Dest);
+    auto Dest = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
     _VStoreVectorElement(OpSize::i128Bit, OpSize::i64Bit, Src1.Low, 1, Dest);
   } else if (!Op->Src[1].IsGPR()) {
     ///< VMOVHPS/PD xmm2, xmm1, mem64
-    auto Src2 = MakeSegmentAddress(Op, Op->Src[1]);
+    auto Src2 = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Src[1]));
 
     // Bits[63:0] come from Src1[63:0]
     // Bits[127:64] come from Src2[63:0]
@@ -512,7 +512,7 @@ void OpDispatchBuilder::AVX128_VBROADCAST(OpcodeArgs, IR::OpSize ElementSize) {
     }
   } else {
     // Get the address to broadcast from into a GPR.
-    Ref Address = MakeSegmentAddress(Op, Op->Src[0], GetGPROpSize());
+    Ref Address = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Src[0], GetGPROpSize()));
     Src.Low = _VBroadcastFromMem(OpSize::i128Bit, ElementSize, Address);
   }
 
@@ -734,7 +734,7 @@ void OpDispatchBuilder::AVX128_MOVBetweenGPR_FPR(OpcodeArgs) {
       StoreResultGPR(Op, Op->Dest, Src.Low);
     } else {
       // Storing first element to memory.
-      Ref Dest = LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false});
+      Ref Dest = ApplyGuestMemoryRebase(LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false}));
       _StoreMemFPR(OpSizeFromDst(Op), Dest, Src.Low, OpSize::i8Bit);
     }
   }
@@ -768,7 +768,7 @@ void OpDispatchBuilder::AVX128_PExtr(OpcodeArgs, IR::OpSize ElementSize) {
   }
 
   // If we are storing to memory then we store the size of the element extracted
-  Ref Dest = MakeSegmentAddress(Op, Op->Dest);
+  Ref Dest = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
   _VStoreVectorElement(OpSize::i128Bit, OverridenElementSize, Src.Low, Index, Dest);
 }
 
@@ -919,7 +919,7 @@ void OpDispatchBuilder::AVX128_PINSRImpl(OpcodeArgs, IR::OpSize ElementSize, con
     Result.Low = _VInsGPR(OpSize::i128Bit, ElementSize, Index, Src1.Low, Src2);
   } else {
     // If loading from memory then we only load the element size
-    auto Src2 = MakeSegmentAddress(Op, Src2Op);
+    auto Src2 = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Src2Op));
     Result.Low = _VLoadVectorElement(OpSize::i128Bit, ElementSize, Src1.Low, Index, Src2);
   }
 
@@ -1571,7 +1571,7 @@ void OpDispatchBuilder::AVX128_VMASKMOVImpl(OpcodeArgs, IR::OpSize ElementSize, 
   auto Mask = AVX128_LoadSource_WithOpSize(Op, MaskOp, Op->Flags, !Is128Bit);
 
   const auto MakeAddress = [this, Op](const X86Tables::DecodedOperand& Data) {
-    return MakeSegmentAddress(Op, Data, GetGPROpSize());
+    return ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Data, GetGPROpSize()));
   };
 
   if (IsStore) {
@@ -1619,7 +1619,7 @@ void OpDispatchBuilder::AVX128_MASKMOV(OpcodeArgs) {
   auto VectorSrc = AVX128_LoadSource_WithOpSize(Op, Op->Dest, Op->Flags, !Is128Bit);
 
   // RDI source (DS prefix by default)
-  auto MemDest = MakeSegmentAddress(X86State::REG_RDI, Op->Flags, X86Tables::DecodeFlags::FLAG_DS_PREFIX);
+  auto MemDest = ApplyGuestMemoryRebase(MakeSegmentAddress(X86State::REG_RDI, Op->Flags, X86Tables::DecodeFlags::FLAG_DS_PREFIX));
 
   Ref XMMReg = _LoadMemFPR(Size, MemDest, OpSize::i8Bit);
 

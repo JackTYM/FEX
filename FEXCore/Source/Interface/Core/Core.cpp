@@ -376,6 +376,11 @@ void ContextImpl::HandleCallback(FEXCore::Core::InternalThreadState* Thread, uin
 }
 
 void ContextImpl::ExecuteThread(FEXCore::Core::InternalThreadState* Thread) {
+  // Anchor the trusted Thread for this host thread so Arm64JITCore::ExitFunctionLink (a static entry
+  // reached from JIT link thunks) can validate the Frame/Record it is handed without dereferencing a
+  // possibly-corrupt Frame. This always runs on the host thread that executes this guest thread's JIT.
+  FEXCore::CPU::ExitLinkTrustedThread = Thread;
+
   // Update the thread pointer for Thunk return to the latest.
   Thread->CurrentFrame->Pointers.ThunkCallbackRet = SignalDelegation->GetThunkCallbackRET();
 
@@ -637,7 +642,20 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
         }
 
         if (Config.SMCChecks == FEXCore::Config::CONFIG_SMC_FULL || Block.ForceFullSMCDetection) {
-          auto ExistingCodePtr = reinterpret_cast<uint8_t*>(Block.Entry + BlockInstructionsLength);
+          // See FEXCore::IR::WOW64_GUEST_REBASE's doc comment (Addressing.h) - Block.Entry is a
+          // guest address; rebase it the same way instruction fetch does, so this reads the
+          // embedder's real host backing for 32-bit guest memory instead of the (permanently
+          // unmapped, on Apple Silicon macOS) literal guest address. See Frontend.cpp's
+          // AdjustAddrForSpecialRegion for why a 64-bit-mode Context belonging to a wow64 process
+          // (Config.NeedsWow64GuestRebase) also needs this, conditionally.
+          const uint64_t CheckAddress = Block.Entry + BlockInstructionsLength;
+          uint64_t Rebase = 0;
+          if (!Config.Is64BitMode) {
+            Rebase = IR::WOW64_GUEST_REBASE;
+          } else if (Config.NeedsWow64GuestRebase && CheckAddress < IR::WOW64_GUEST_ADDRESS_SPACE_SIZE) {
+            Rebase = IR::WOW64_GUEST_REBASE;
+          }
+          auto ExistingCodePtr = reinterpret_cast<uint8_t*>(CheckAddress + Rebase);
           auto InstAddressReg = Thread->OpDispatcher->_EntrypointOffset(GPRSize, InstAddress - GuestRIP);
           std::array<uint8_t, 0x10> CodeOriginal;
           memcpy(CodeOriginal.data(), ExistingCodePtr, DecodedInfo->InstSize);
@@ -938,6 +956,9 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
       CodeMapWriter->AppendBlock(*Region, GuestRIP);
     }
   }
+
+  // DEBUG AID (kept intentionally, cheap): see DebugLastCompiledGuestRip's doc comment (CoreState.h).
+  Frame->DebugLastCompiledGuestRip = GuestRIP;
 
   return (uintptr_t)CodePtr;
 }

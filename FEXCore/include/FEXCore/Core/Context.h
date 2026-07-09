@@ -168,6 +168,18 @@ public:
   FEX_DEFAULT_VISIBILITY virtual void SetHardwareTSOSupport(bool HardwareTSOSupported) = 0;
 
   /**
+   * @brief sogen/macOS-specific: enables the runtime-conditional wow64 guest-memory rebase for a
+   * 64-bit-mode Context (see WOW64GUESTREBASE's doc comment in Config.json.in and
+   * GuestMemoryRebase()'s in OpcodeDispatcher.h). Unlike IS64BIT_MODE, this can be set any time
+   * after context construction (before the first block compiles) - a process's wow64-ness is only
+   * known once its main executable's PE header has been read, which happens after the Context
+   * embedding it already exists.
+   *
+   * @param NeedsRebase Whether this 64-bit-mode Context belongs to a wow64 process.
+   */
+  FEX_DEFAULT_VISIBILITY virtual void SetNeedsWow64GuestRebase(bool NeedsRebase) = 0;
+
+  /**
    * @brief Enable exiting the JIT when HLT is hit.
    *
    * This is to workaround a bug in Wine's longjump function which breaks our unittests.

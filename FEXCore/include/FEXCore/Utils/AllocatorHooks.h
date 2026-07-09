@@ -3,6 +3,7 @@
 #include <FEXCore/Utils/CompilerDefs.h>
 #include <FEXCore/Utils/EnumOperators.h>
 #include <FEXCore/Utils/LogManager.h>
+#include <FEXCore/Utils/TypeDefines.h>
 
 #ifndef _WIN32
 #include <stdlib.h>
@@ -167,7 +168,27 @@ inline void VirtualFree(void* Ptr, size_t Size) {
   FEXCore::Allocator::munmap(Ptr, Size);
 }
 inline void VirtualDontNeed(void* Ptr, size_t Size, bool Recommit = true) {
+#ifdef __APPLE__
+  // Darwin's madvise(MADV_DONTNEED) does NOT zero-fill anonymous pages the way Linux does - it is
+  // effectively advisory - so every caller that relies on VirtualDontNeed to *clear* memory would
+  // silently keep stale data on macOS. The critical one is LookupCache::ClearThreadLocalCaches, run on
+  // each JIT code-buffer switch (ChangeGuestToHostMapping) to drop the per-thread L1/L2 block lookup
+  // cache: with the clear silently no-op'ing, a stale entry mapping a guest RIP to an older buffer's
+  // host code survives, and once that buffer is freed the dispatcher jumps into it - inaccessible
+  // (PROT_NONE) on Apple - and faults. Honour the zero-on-reuse contract explicitly: for page-aligned
+  // regions replace them with fresh, zero-filled, decommitted anonymous pages (mmap MAP_FIXED, the
+  // Darwin equivalent of Linux's MADV_DONTNEED on anonymous memory - this also keeps the large, sparsely
+  // populated L2 page table from being fully committed by a plain memset); zero the rare sub-page
+  // caller in place (__builtin_memset avoids pulling <string.h> into this widely-included header).
+  const uintptr_t Addr = reinterpret_cast<uintptr_t>(Ptr);
+  if ((Addr & (FEXCore::Utils::FEX_HOST_PAGE_SIZE - 1)) == 0 && (Size & (FEXCore::Utils::FEX_HOST_PAGE_SIZE - 1)) == 0) {
+    ::mmap(Ptr, Size, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  } else {
+    __builtin_memset(Ptr, 0, Size);
+  }
+#else
   ::madvise(reinterpret_cast<void*>(Ptr), Size, MADV_DONTNEED);
+#endif
 }
 inline bool VirtualProtect(void* Ptr, size_t Size, ProtectOptions options) {
   int prot {PROT_NONE};

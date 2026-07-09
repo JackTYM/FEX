@@ -7,7 +7,8 @@
 
 namespace FEXCore::IR {
 
-Ref LoadEffectiveAddress(IREmitter* IREmit, const AddressMode& A, IR::OpSize GPRSize, bool AddSegmentBase, bool AllowUpperGarbage) {
+Ref LoadEffectiveAddress(IREmitter* IREmit, const AddressMode& A, IR::OpSize GPRSize, bool AddSegmentBase, bool AllowUpperGarbage,
+                         GuestRebaseInfo Rebase) {
   Ref Tmp = A.Base;
 
   if (A.Offset) {
@@ -48,18 +49,35 @@ Ref LoadEffectiveAddress(IREmitter* IREmit, const AddressMode& A, IR::OpSize GPR
     Tmp = Tmp ? IREmit->Add(GPRSize, Tmp, A.Segment) : A.Segment;
   }
 
+  // See WOW64_GUEST_REBASE's doc comment (Addressing.h) - only applied for actual dereferences
+  // (AddSegmentBase, same gate as the guest segment base above), and always computed as a 64-bit
+  // value: Tmp may be a narrower (e.g. 32-bit-mode) IR value, but per FEXCore's own x86 semantics
+  // its upper bits are already zeroed, so treating it as a plain 64-bit value here is correct.
+  if (AddSegmentBase && Rebase.Rebase) {
+    Ref Base = Tmp ?: IREmit->Constant(0);
+    if (Rebase.Conditional) {
+      // See GuestRebaseInfo's doc comment - a 64-bit-mode Context's addresses aren't restricted to
+      // any particular range, so this must be a genuine runtime check, not a flat add.
+      Ref RebasedBase = IREmit->Add(OpSize::i64Bit, Base, IREmit->Constant(Rebase.Rebase));
+      Tmp = IREmit->_Select(OpSize::i64Bit, OpSize::i64Bit, CondClass::ULT, Base, IREmit->Constant(WOW64_GUEST_ADDRESS_SPACE_SIZE),
+                            RebasedBase, Base);
+    } else {
+      Tmp = IREmit->Add(OpSize::i64Bit, Base, IREmit->Constant(Rebase.Rebase));
+    }
+  }
+
   return Tmp ?: IREmit->Constant(0);
 }
 
 AddressMode SelectAddressMode(IREmitter* IREmit, const AddressMode& A, IR::OpSize GPRSize, bool HostSupportsTSOImm9, bool AtomicTSO,
-                              bool Vector, IR::OpSize AccessSize) {
+                              bool Vector, IR::OpSize AccessSize, GuestRebaseInfo Rebase) {
   const auto Is32Bit = GPRSize == OpSize::i32Bit;
   const auto GPRSizeMatchesAddrSize = A.AddrSize == GPRSize;
   const auto OffsetIndexToLargeFor32Bit = Is32Bit && (A.Offset <= -16384 || A.Offset >= 16384);
   if (!GPRSizeMatchesAddrSize || OffsetIndexToLargeFor32Bit) {
     // If address size doesn't match GPR size then no optimizations can occur.
     return {
-      .Base = LoadEffectiveAddress(IREmit, A, GPRSize, true),
+      .Base = LoadEffectiveAddress(IREmit, A, GPRSize, true, false, Rebase),
       .Index = IREmit->Invalid(),
     };
   }
@@ -101,7 +119,7 @@ AddressMode SelectAddressMode(IREmitter* IREmit, const AddressMode& A, IR::OpSiz
     B.Offset = 0;
 
     return {
-      .Base = LoadEffectiveAddress(IREmit, B, GPRSize, true /* AddSegmentBase */, false),
+      .Base = LoadEffectiveAddress(IREmit, B, GPRSize, true /* AddSegmentBase */, false, Rebase),
       .Index = IREmit->Constant(A.Offset),
       .IndexType = MemOffsetType::SXTX,
       .IndexScale = 1,
@@ -110,7 +128,15 @@ AddressMode SelectAddressMode(IREmitter* IREmit, const AddressMode& A, IR::OpSiz
 
   if (AtomicTSO) {
     // TODO: LRCPC3 support for vector Imm9.
-  } else if (!Is32Bit && A.Base && (A.Index || A.Segment) && !A.Offset && (A.IndexScale == 1 || A.IndexScale == AccessSizeAsImm)) {
+  } else if (!Is32Bit && !Rebase.Rebase && A.Base && (A.Index || A.Segment) && !A.Offset &&
+            (A.IndexScale == 1 || A.IndexScale == AccessSizeAsImm)) {
+    // This folds A.Segment directly into the addressing mode without ever calling
+    // LoadEffectiveAddress, so it must not be taken when a rebase might apply (see
+    // GuestRebaseInfo's doc comment) - gated on !Rebase.Rebase here for that reason. Safe/cheap:
+    // this optimization is 64-bit-mode-only (!Is32Bit) and a wow64-conditional rebase is the only
+    // way Rebase.Rebase is ever nonzero in 64-bit mode, so this only ever falls through to the
+    // slower, general path (below) for the rare GS-relative-with-index-register case in a wow64
+    // process - never for an ordinary 64-bit-only process, where Rebase.Rebase is always 0.
     AddressMode B = A;
 
     // ScaledRegisterLoadstore
@@ -134,7 +160,7 @@ AddressMode SelectAddressMode(IREmitter* IREmit, const AddressMode& A, IR::OpSiz
         B.Offset = 0;
 
         return {
-          .Base = LoadEffectiveAddress(IREmit, B, GPRSize, true /* AddSegmentBase */, false),
+          .Base = LoadEffectiveAddress(IREmit, B, GPRSize, true /* AddSegmentBase */, false, Rebase),
           .Index = IREmit->Constant(A.Offset),
           .IndexType = MemOffsetType::SXTX,
           .IndexScale = 1,
@@ -145,7 +171,7 @@ AddressMode SelectAddressMode(IREmitter* IREmit, const AddressMode& A, IR::OpSiz
 
   // Fallback on software address calculation
   return {
-    .Base = LoadEffectiveAddress(IREmit, A, GPRSize, true),
+    .Base = LoadEffectiveAddress(IREmit, A, GPRSize, true, false, Rebase),
     .Index = IREmit->Invalid(),
   };
 }

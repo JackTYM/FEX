@@ -47,7 +47,7 @@ void OpDispatchBuilder::MOVVectorNTOp(OpcodeArgs, bool IsAVX) {
 
   if (Op->Dest.IsGPR() && Size >= OpSize::i128Bit) {
     ///< MOVNTDQA load non-temporal comes from SSE4.1 and is extended by AVX/AVX2.
-    Ref SrcAddr = LoadSourceGPR(Op, Op->Src[0], Op->Flags, {.LoadData = false});
+    Ref SrcAddr = ApplyGuestMemoryRebase(LoadSourceGPR(Op, Op->Src[0], Op->Flags, {.LoadData = false}));
     auto Src = _VLoadNonTemporal(Size, SrcAddr, 0);
 
     if (IsAVX) {
@@ -72,7 +72,7 @@ void OpDispatchBuilder::MOVVectorNTOp(OpcodeArgs, bool IsAVX) {
       // MMX 64-bit comes from MOVNTQ
       StoreResultFPR(Op, Src, OpSize::i8Bit, MemoryAccessType::STREAM);
     } else {
-      Ref Dest = LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false});
+      Ref Dest = ApplyGuestMemoryRebase(LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false}));
 
       // Single store non-temporal for larger operations.
       _VStoreNonTemporal(Size, Src, Dest, 0);
@@ -115,7 +115,7 @@ void OpDispatchBuilder::MOVHPDOp(OpcodeArgs) {
     } else {
       // If the destination is a GPR then the source is memory
       // xmm1[127:64] = src
-      Ref Src = MakeSegmentAddress(Op, Op->Src[0]);
+      Ref Src = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Src[0]));
       Ref Dest = LoadSourceFPR_WithOpSize(Op, Op->Dest, OpSize::i128Bit, Op->Flags);
       auto Result = _VLoadVectorElement(OpSize::i128Bit, OpSize::i64Bit, Dest, 1, Src);
       StoreResult_WithAVXInsert(VectorOpType::SSE, RegClass::FPR, Op, Result);
@@ -124,7 +124,7 @@ void OpDispatchBuilder::MOVHPDOp(OpcodeArgs) {
     // In this case memory is the destination and the high bits of the XMM are source
     // Mem64 = xmm1[127:64]
     Ref Src = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
-    Ref Dest = MakeSegmentAddress(Op, Op->Dest);
+    Ref Dest = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
     _VStoreVectorElement(OpSize::i128Bit, OpSize::i64Bit, Src, 1, Dest);
   }
 }
@@ -153,7 +153,7 @@ void OpDispatchBuilder::MOVLPOp(OpcodeArgs) {
       StoreResult_WithAVXInsert(VectorOpType::SSE, RegClass::FPR, Op, Result, OpSize::i128Bit);
     } else {
       const auto DstSize = OpSizeFromDst(Op);
-      Ref Src = MakeSegmentAddress(Op, Op->Src[0]);
+      Ref Src = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Src[0]));
       Ref Dest = LoadSourceFPR_WithOpSize(Op, Op->Dest, DstSize, Op->Flags);
       auto Result = _VLoadVectorElement(OpSize::i128Bit, OpSize::i64Bit, Dest, 0, Src);
       StoreResult_WithAVXInsert(VectorOpType::SSE, RegClass::FPR, Op, Result);
@@ -2027,7 +2027,7 @@ void OpDispatchBuilder::VBROADCASTOp(OpcodeArgs, IR::OpSize ElementSize) {
     Result = _VDupElement(DstSize, ElementSize, Src, 0);
   } else {
     // Get the address to broadcast from into a GPR.
-    Ref Address = MakeSegmentAddress(Op, Op->Src[0], GetGPROpSize());
+    Ref Address = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Src[0], GetGPROpSize()));
     Result = _VBroadcastFromMem(DstSize, ElementSize, Address);
   }
 
@@ -2051,7 +2051,7 @@ Ref OpDispatchBuilder::PINSROpImpl(OpcodeArgs, IR::OpSize ElementSize, const X86
   }
 
   // If loading from memory then we only load the element size
-  Ref Src2 = MakeSegmentAddress(Op, Src2Op);
+  Ref Src2 = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Src2Op));
   return _VLoadVectorElement(Size, ElementSize, Src1, Index, Src2);
 }
 
@@ -2155,7 +2155,7 @@ void OpDispatchBuilder::PExtrOp(OpcodeArgs, IR::OpSize ElementSize) {
   }
 
   // If we are storing to memory then we store the size of the element extracted
-  Ref Dest = MakeSegmentAddress(Op, Op->Dest);
+  Ref Dest = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
   _VStoreVectorElement(OpSize::i128Bit, OverridenElementSize, Src, Index, Dest);
 }
 
@@ -2786,7 +2786,7 @@ void OpDispatchBuilder::MASKMOVOp(OpcodeArgs) {
   Ref VectorSrc = LoadSourceGPR(Op, Op->Dest, Op->Flags);
 
   // RDI source (DS prefix by default)
-  auto MemDest = MakeSegmentAddress(X86State::REG_RDI, Op->Flags, X86Tables::DecodeFlags::FLAG_DS_PREFIX);
+  auto MemDest = ApplyGuestMemoryRebase(MakeSegmentAddress(X86State::REG_RDI, Op->Flags, X86Tables::DecodeFlags::FLAG_DS_PREFIX));
 
   Ref XMMReg = _LoadMemFPR(Size, MemDest, OpSize::i8Bit);
 
@@ -2799,7 +2799,7 @@ void OpDispatchBuilder::VMASKMOVOpImpl(OpcodeArgs, IR::OpSize ElementSize, IR::O
                                        const X86Tables::DecodedOperand& MaskOp, const X86Tables::DecodedOperand& DataOp) {
 
   const auto MakeAddress = [this, Op](const X86Tables::DecodedOperand& Data) {
-    return MakeSegmentAddress(Op, Data, GetGPROpSize());
+    return ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Data, GetGPROpSize()));
   };
 
   Ref Mask = LoadSourceFPR_WithOpSize(Op, MaskOp, DataSize, Op->Flags);
@@ -2853,7 +2853,7 @@ void OpDispatchBuilder::MOVBetweenGPR_FPR(OpcodeArgs, VectorOpType VectorType) {
       StoreResultGPR(Op, Op->Dest, Src);
     } else {
       // Storing first element to memory.
-      Ref Dest = LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false});
+      Ref Dest = ApplyGuestMemoryRebase(LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false}));
       _StoreMemFPR(OpSizeFromDst(Op), Dest, Src, OpSize::i8Bit);
     }
   }
@@ -2955,7 +2955,7 @@ void OpDispatchBuilder::AVXVFCMPOp(OpcodeArgs, IR::OpSize ElementSize) {
 }
 
 void OpDispatchBuilder::FXSaveOp(OpcodeArgs) {
-  Ref Mem = MakeSegmentAddress(Op, Op->Dest);
+  Ref Mem = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
 
   SaveX87State(Op, Mem);
   SaveSSEState(Mem);
@@ -2967,7 +2967,7 @@ void OpDispatchBuilder::XSaveOp(OpcodeArgs) {
 }
 
 Ref OpDispatchBuilder::XSaveBase(X86Tables::DecodedOp Op) {
-  return MakeSegmentAddress(Op, Op->Dest);
+  return ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
 }
 
 void OpDispatchBuilder::XSaveOpImpl(OpcodeArgs) {
@@ -3148,7 +3148,7 @@ Ref OpDispatchBuilder::GetMXCSR() {
 }
 
 void OpDispatchBuilder::FXRStoreOp(OpcodeArgs) {
-  Ref Mem = MakeSegmentAddress(Op, Op->Src[0]);
+  Ref Mem = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Src[0]));
 
   RestoreX87State(Mem);
   RestoreSSEState(Mem);

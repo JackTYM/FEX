@@ -1255,6 +1255,80 @@ public:
     return Is64BitMode ? IR::OpSize::i64Bit : IR::OpSize::i32Bit;
   }
 
+  // See Addressing.h's WOW64_GUEST_REBASE/GuestRebaseInfo doc comments: sogen (the embedder) needs
+  // 32-bit guest memory dereferences rebased to a host address range that's actually mappable on
+  // Apple Silicon macOS (the low 4GB is permanently unmapped there) - unconditionally, since every
+  // 32-bit-mode address is inherently below that range already. A 64-bit-mode Context belonging to
+  // a wow64 process (CTX->Config.NeedsWow64GuestRebase - see its doc comment, public Context.h)
+  // also needs this, but only conditionally (its addresses aren't restricted to any range) - see
+  // GuestRebaseInfo::Conditional. An ordinary 64-bit-only Context needs no rebase at all.
+  IR::GuestRebaseInfo GuestMemoryRebase() const {
+    if (!Is64BitMode) {
+      return {.Rebase = IR::WOW64_GUEST_REBASE, .Conditional = false};
+    }
+    if (CTX->Config.NeedsWow64GuestRebase) {
+      return {.Rebase = IR::WOW64_GUEST_REBASE, .Conditional = true};
+    }
+    return {};
+  }
+
+  // Applies WOW64_GUEST_REBASE to an already-computed guest memory address that is about to be
+  // dereferenced *directly* by an IR op that takes a final host pointer - an atomic (_CAS/_CASPair/
+  // _AtomicFetch*/_AtomicSwap), a vector element/broadcast/masked/non-temporal load-store
+  // (_VLoadVectorElement/_VStoreVectorElement/_VBroadcastFromMem/_V{Load,Store}VectorMasked/
+  // _V{Load,Store}NonTemporal), a bare-Ref _LoadMem/_StoreMem (string ops, FXSAVE/XSAVE, MOVSS/MOVSD,
+  // MOVNT, the far-jump RIP load), or a cache op (_CacheLineClear/Clean/Zero). Those ops never rebase
+  // the pointer themselves - unlike the normal load/store path
+  // (_LoadMemAutoTSO/_StoreMemAutoTSO -> SelectAddressMode) which rebases internally. The atomic ops'
+  // addresses come from MakeSegmentAddress, which calls LoadEffectiveAddress with AddSegmentBase=false
+  // (it appends the segment itself) and so - by LoadEffectiveAddress's AddSegmentBase-gated rebase -
+  // never gets the rebase applied. Without this, a wow64 guest's `lock cmpxchg`/`xadd`/`xchg`/`lock
+  // add` on 32-bit memory dereferences the raw guest address (e.g. 0x3c202c0) instead of its host
+  // backing at WOW64_GUEST_REBASE + addr, faulting. Mirrors LoadEffectiveAddress's own rebase
+  // (Addressing.cpp): an unconditional flat add in 32-bit mode, a runtime range-checked Select for a
+  // 64-bit-mode wow64 Context (whose addresses aren't range-restricted). A no-op for an ordinary
+  // 64-bit-only Context, where GuestMemoryRebase() returns {}.
+  Ref ApplyGuestMemoryRebase(Ref Address) {
+    const auto Rebase = GuestMemoryRebase();
+    if (!Rebase.Rebase || !Address) {
+      return Address;
+    }
+
+    if (Rebase.Conditional) {
+      Ref RebasedBase = Add(IR::OpSize::i64Bit, Address, Constant(Rebase.Rebase));
+      return _Select(IR::OpSize::i64Bit, IR::OpSize::i64Bit, CondClass::ULT, Address,
+                     Constant(IR::WOW64_GUEST_ADDRESS_SPACE_SIZE), RebasedBase, Address);
+    }
+
+    return Add(IR::OpSize::i64Bit, Address, Constant(Rebase.Rebase));
+  }
+
+  // The WOW64_GUEST_REBASE offset to *add* to a guest base address for a direct dereference, returned
+  // as a separable addend (nullptr when no rebase applies) rather than folded into the address.
+  // Used by the string ops (MOVS/STOS via _MemCpy/_MemSet), which advance the base pointer and write
+  // it back to RSI/RDI as a *guest* address: the caller adds this addend to the address it hands the
+  // memory op, then subtracts the same SSA value from the returned pointer so the register stays a
+  // guest address. Mirrors ApplyGuestMemoryRebase (flat add in 32-bit mode, a runtime range-checked
+  // Select for a 64-bit-mode wow64 Context); returns nullptr for an ordinary 64-bit-only Context so
+  // the callers' `if (Addend)` guard (matching GetSegment's nullptr convention) correctly skips the
+  // fold. Returning InvalidNode here instead would be truthy and make the callers emit an
+  // `Add(addr, <undefined-node>)`, corrupting every non-wow64 string-op address with a garbage
+  // register value.
+  Ref GuestMemoryRebaseAddend(Ref BaseAddr) {
+    const auto Rebase = GuestMemoryRebase();
+    if (!Rebase.Rebase) {
+      return nullptr;
+    }
+
+    Ref RebaseConst = Constant(Rebase.Rebase);
+    if (!Rebase.Conditional) {
+      return RebaseConst;
+    }
+
+    return _Select(IR::OpSize::i64Bit, IR::OpSize::i64Bit, CondClass::ULT, BaseAddr,
+                   Constant(IR::WOW64_GUEST_ADDRESS_SPACE_SIZE), RebaseConst, Constant(0));
+  }
+
 protected:
   void RecordX87Use() override {
     CurrentHeader->HasX87 = true;
@@ -2468,7 +2542,8 @@ private:
 
   Ref _LoadMemAutoTSO(RegClass Class, OpSize Size, const AddressMode& A, OpSize Align = OpSize::i8Bit) {
     const bool AtomicTSO = IsTSOEnabled(Class) && !A.NonTSO;
-    const auto B = SelectAddressMode(this, A, GetGPROpSize(), CTX->HostFeatures.SupportsTSOImm9, AtomicTSO, Class != RegClass::GPR, Size);
+    const auto B = SelectAddressMode(this, A, GetGPROpSize(), CTX->HostFeatures.SupportsTSOImm9, AtomicTSO, Class != RegClass::GPR, Size,
+                                     GuestMemoryRebase());
 
     if (AtomicTSO) {
       return _LoadMemTSO(Class, Size, B.Base, B.Index, Align, B.IndexType, B.IndexScale);
@@ -2494,7 +2569,7 @@ private:
       A.Offset = 0;
     }
 
-    Out.Base = LoadEffectiveAddress(this, A, GetGPROpSize(), true, false);
+    Out.Base = LoadEffectiveAddress(this, A, GetGPROpSize(), true, false, GuestMemoryRebase());
     return Out;
   }
 
@@ -2531,7 +2606,8 @@ private:
 
   Ref _StoreMemAutoTSO(RegClass Class, OpSize Size, const AddressMode& A, Ref Value, OpSize Align = OpSize::i8Bit) {
     const bool AtomicTSO = IsTSOEnabled(Class) && !A.NonTSO;
-    const auto B = SelectAddressMode(this, A, GetGPROpSize(), CTX->HostFeatures.SupportsTSOImm9, AtomicTSO, Class != RegClass::GPR, Size);
+    const auto B = SelectAddressMode(this, A, GetGPROpSize(), CTX->HostFeatures.SupportsTSOImm9, AtomicTSO, Class != RegClass::GPR, Size,
+                                     GuestMemoryRebase());
 
     if (AtomicTSO) {
       return _StoreMemTSO(Class, Size, Value, B.Base, B.Index, Align, B.IndexType, B.IndexScale);
@@ -2566,13 +2642,32 @@ private:
     return _StoreMemPairAutoTSO(RegClass::FPR, Size, A, Value1, Value2, Align);
   }
 
-  Ref Pop(IR::OpSize Size, Ref SP_RMW) {
+  // The fused _Pop/_Push JIT ops dereference the guest SP register *directly* (a pre/post-index
+  // load/store against the SRA-mapped RSP) and so never get WOW64_GUEST_REBASE applied - unlike the
+  // normal load/store path (_LoadMemAutoTSO/_StoreMemAutoTSO -> SelectAddressMode). In a wow64 Context
+  // that faults on the raw guest stack address. When a rebase is active, decompose into an explicit
+  // guest-address SP advance plus a rebased memory access: the SP register keeps a plain guest value
+  // while only the host dereference is rebased. A strict no-op for an ordinary 64-bit-only Context
+  // (GuestMemoryRebase() returns {}), which keeps the fused fast path byte-identical.
+  Ref Pop(IR::OpSize Size, Ref& SP_RMW) {
+    if (GuestMemoryRebase().Rebase) {
+      Ref Value = _LoadMemGPRAutoTSO(Size, ApplyGuestMemoryRebase(SP_RMW));
+      SP_RMW = Add(GetGPROpSize(), SP_RMW, IR::OpSizeToSize(Size));
+      return Value;
+    }
     Ref Value = _AllocateGPR(false);
     _Pop(Size, SP_RMW, Value);
     return Value;
   }
 
   Ref Pop(IR::OpSize Size) {
+    if (GuestMemoryRebase().Rebase) {
+      Ref SP = LoadGPRRegister(X86State::REG_RSP);
+      Ref Value = _LoadMemGPRAutoTSO(Size, ApplyGuestMemoryRebase(SP));
+      StoreGPRRegister(X86State::REG_RSP, Add(GetGPROpSize(), SP, IR::OpSizeToSize(Size)));
+      return Value;
+    }
+
     Ref SP = _RMWHandle(LoadGPRRegister(X86State::REG_RSP));
     Ref Value = _AllocateGPR(false);
 
@@ -2592,8 +2687,15 @@ private:
 
   void Push(IR::OpSize Size, Ref Value) {
     auto OldSP = LoadGPRRegister(X86State::REG_RSP);
-    auto NewSP = _Push(GetGPROpSize(), Size, Value, OldSP);
-    StoreGPRRegister(X86State::REG_RSP, NewSP);
+    if (GuestMemoryRebase().Rebase) {
+      // See the Pop() note: rebase only the host store address, keep the SP register a guest value.
+      Ref NewSP = Sub(GetGPROpSize(), OldSP, IR::OpSizeToSize(Size));
+      _StoreMemGPRAutoTSO(Size, ApplyGuestMemoryRebase(NewSP), Value);
+      StoreGPRRegister(X86State::REG_RSP, NewSP);
+    } else {
+      auto NewSP = _Push(GetGPROpSize(), Size, Value, OldSP);
+      StoreGPRRegister(X86State::REG_RSP, NewSP);
+    }
     FlushRegisterCache();
   }
 

@@ -27,7 +27,7 @@ void OpDispatchBuilder::X87LDENVF64(OpcodeArgs) {
   _StackForceSlow();
 
   const auto Size = OpSizeFromSrc(Op);
-  Ref Mem = MakeSegmentAddress(Op, Op->Src[0]);
+  Ref Mem = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Src[0]));
 
   auto NewFCW = _LoadMemGPR(OpSize::i16Bit, Mem, OpSize::i16Bit);
   // ignore the rounding precision, we're always 64-bit in F64.

@@ -599,6 +599,21 @@
         "Type": "bool",
         "Default": "false"
       },
+      "WOW64GUESTREBASE": {
+        "Type": "bool",
+        "Default": "false",
+        "Desc": [
+          "sogen/macOS-specific: when set on a 64-bit-mode Context (IS64BIT_MODE=1) belonging to a",
+          "wow64 process, every guest memory dereference/instruction fetch is rebased by",
+          "WOW64_GUEST_REBASE if (and only if) the computed address is below 4GB - unlike",
+          "IS64BIT_MODE=0's unconditional rebase (every address a 32-bit-mode Context computes is",
+          "inherently below 4GB already), a 64-bit-mode Context's addresses are not restricted, so",
+          "this must be a genuine runtime check, not a flat add. Needed because sogen deliberately",
+          "places some real 64-bit-executed content (the wow64 TEB pair, wow64cpu.dll, its own",
+          "heaven's-gate trampoline) below 4GB for 32-bit-pointer reachability, even though it runs",
+          "under the always-64-bit-mode Context - see fex_x86_64_emulator.cpp's rebase_for."
+        ]
+      },
       "DISABLE_VIXL_INDIRECT_RUNTIME_CALLS": {
         "Type": "bool",
         "Default": "true",

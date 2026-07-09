@@ -7,6 +7,7 @@ $end_info$
 */
 
 #include "Interface/Context/Context.h"
+#include "Interface/Core/Addressing.h"
 #include "Interface/Core/Frontend.h"
 #include "Interface/Core/X86Tables/X86Tables.h"
 #include "Interface/Core/LookupCache.h"
@@ -1358,9 +1359,24 @@ const Decoder::DecodeStream Decoder::AdjustAddrForSpecialRegion(const uint8_t* _
     };
   }
 
+  // See FEXCore::IR::WOW64_GUEST_REBASE's doc comment (Addressing.h): on Apple Silicon macOS, a
+  // 32-bit guest's entire address space is permanently unmappable, so the embedder backs it at a
+  // rebased host address instead. InstStream stays the real guest VA (used for
+  // QueryGuestExecutableRange/CheckRangeExecutable below) - only the pointer actually read from is
+  // rebased. A 32-bit-mode Context's RIP is always below WOW64_GUEST_ADDRESS_SPACE_SIZE already, so
+  // the rebase applies unconditionally there; a 64-bit-mode Context belonging to a wow64 process
+  // (CTX->Config.NeedsWow64GuestRebase - see GuestRebaseInfo's doc comment) needs the same runtime
+  // check as data accesses, since sogen deliberately places some real 64-bit-executed content (the
+  // heaven's-gate trampoline, wow64cpu.dll) below 4GB for 32-bit-pointer reachability.
+  uint64_t Rebase = 0;
+  if (!CTX->Config.Is64BitMode) {
+    Rebase = IR::WOW64_GUEST_REBASE;
+  } else if (CTX->Config.NeedsWow64GuestRebase && RIP < IR::WOW64_GUEST_ADDRESS_SPACE_SIZE) {
+    Rebase = IR::WOW64_GUEST_REBASE;
+  }
   return DecodeStream {
     .InstStream = _InstStream - EntryPoint + RIP,
-    .AdjustedInstStream = _InstStream - EntryPoint + RIP,
+    .AdjustedInstStream = _InstStream - EntryPoint + RIP + Rebase,
   };
 }
 

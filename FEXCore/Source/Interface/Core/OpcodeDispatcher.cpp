@@ -101,6 +101,29 @@ void OpDispatchBuilder::SyscallOp(OpcodeArgs, bool IsSyscallInst) {
     StoreGPRRegister(X86State::REG_RAX, SyscallOp);
   }
 
+  if (OSABI == FEXCore::HLE::SyscallOSABI::OS_GENERIC) {
+    // sogen's generic ABI has REDIRECTING syscalls (e.g. NtContinue) whose handler overwrites
+    // CPUState.rip with a fresh target instead of the post-syscall fallthrough address. `syscall`
+    // is not FLAGS_BLOCK_END on non-Windows hosts, so without this the JIT falls through to the next
+    // guest instruction and silently drops the redirect (branch to a stale/zero rip). Emit a runtime
+    // check: if the handler left rip at the fallthrough address it did NOT redirect, so continue
+    // in-function (no extra ExitFunctionLink); otherwise honor the new rip.
+    auto ActualRIP = _LoadContextGPR(GPRSize, offsetof(FEXCore::Core::CPUState, rip));
+    auto FallthroughRIP = GetRelocatedPC(Op);
+
+    auto RedirectBlock = CreateNewCodeBlockAfter(GetCurrentBlock());
+    auto ContinueBlock = CreateNewCodeBlockAfter(RedirectBlock);
+    CondJump(ActualRIP, FallthroughRIP, RedirectBlock, ContinueBlock, CondClass::NEQ, GPRSize);
+
+    SetCurrentCodeBlock(RedirectBlock);
+    StartNewBlock();
+    ExitFunction(ActualRIP);
+
+    SetCurrentCodeBlock(ContinueBlock);
+    StartNewBlock();
+    return;
+  }
+
   if (Op->TableInfo->Flags & X86Tables::InstFlags::FLAGS_BLOCK_END) {
     // RIP could have been updated after coming back from the Syscall.
     NewRIP = _LoadContextGPR(GPRSize, offsetof(FEXCore::Core::CPUState, rip));
@@ -231,30 +254,35 @@ void OpDispatchBuilder::SecondaryALUOp(OpcodeArgs) {
   switch (Op->OP) {
   case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x80), 0):
   case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x81), 0):
+  case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x82), 0):
   case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x83), 0):
     IROp = FEXCore::IR::IROps::OP_ADD;
     AtomicIROp = FEXCore::IR::IROps::OP_ATOMICFETCHADD;
     break;
   case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x80), 1):
   case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x81), 1):
+  case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x82), 1):
   case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x83), 1):
     IROp = FEXCore::IR::IROps::OP_OR;
     AtomicIROp = FEXCore::IR::IROps::OP_ATOMICFETCHOR;
     break;
   case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x80), 4):
   case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x81), 4):
+  case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x82), 4):
   case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x83), 4):
     IROp = FEXCore::IR::IROps::OP_ANDWITHFLAGS;
     AtomicIROp = FEXCore::IR::IROps::OP_ATOMICFETCHAND;
     break;
   case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x80), 5):
   case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x81), 5):
+  case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x82), 5):
   case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x83), 5):
     IROp = FEXCore::IR::IROps::OP_SUB;
     AtomicIROp = FEXCore::IR::IROps::OP_ATOMICFETCHSUB;
     break;
   case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x80), 6):
   case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x81), 6):
+  case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x82), 6):
   case OPD(FEXCore::X86Tables::TYPE_GROUP_1, OpToIndex(0x83), 6):
     IROp = FEXCore::IR::IROps::OP_XOR;
     AtomicIROp = FEXCore::IR::IROps::OP_ATOMICFETCHXOR;
@@ -284,7 +312,7 @@ void OpDispatchBuilder::ADCOp(OpcodeArgs, uint32_t SrcIndex) {
     auto ALUOp = IncrementByCarry(OpSize, Src);
     HandledLock = true;
 
-    Ref DestMem = MakeSegmentAddress(Op, Op->Dest);
+    Ref DestMem = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
     Before = _AtomicFetchAdd(Size, ALUOp, DestMem);
   } else {
     Before = LoadSourceGPR(Op, Op->Dest, Op->Flags, {.AllowUpperGarbage = true});
@@ -320,7 +348,7 @@ void OpDispatchBuilder::SBBOp(OpcodeArgs, uint32_t SrcIndex) {
   if (DestIsLockedMem(Op)) {
     HandledLock = true;
 
-    Ref DestMem = MakeSegmentAddress(Op, Op->Dest);
+    Ref DestMem = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
     auto SrcPlusCF = IncrementByCarry(OpSize, Src);
     Before = _AtomicFetchSub(Size, SrcPlusCF, DestMem);
   } else {
@@ -498,7 +526,7 @@ void OpDispatchBuilder::LEAVEOp(OpcodeArgs) {
   const auto OperandSize = (Op->Flags & FEXCore::X86Tables::DecodeFlags::FLAG_OPERAND_SIZE) ? OpSize::i16Bit : GPRSize;
 
   // First we move RBP in to RSP and then behave effectively like a pop
-  auto SP = _RMWHandle(LoadGPRRegister(X86State::REG_RBP));
+  Ref SP = _RMWHandle(LoadGPRRegister(X86State::REG_RBP));
   auto NewGPR = Pop(OperandSize, SP);
 
   // Store the new stack pointer
@@ -647,8 +675,6 @@ void OpDispatchBuilder::CMOVOp(OpcodeArgs) {
   const auto OP = Op->OP & 0xF;
   const auto ResultSize = std::max(OpSize::i32Bit, OpSizeFromSrc(Op));
 
-  CalculateDeferredFlags();
-
   // Destination is always a GPR.
   Ref Dest = LoadSourceGPR_WithOpSize(Op, Op->Dest, GPRSize, Op->Flags);
   Ref Src {}, SrcCond {};
@@ -657,6 +683,12 @@ void OpDispatchBuilder::CMOVOp(OpcodeArgs) {
   } else {
     Src = LoadSourceGPR(Op, Op->Src[0], Op->Flags);
   }
+
+  // Materialize the guest condition flags only after the operand loads. A memory
+  // source's address may go through the WoW64 conditional rebase (_Select), which
+  // clobbers host NZCV; computing deferred flags here ensures they survive into
+  // the _NZCVSelect below.
+  CalculateDeferredFlags();
 
   if (auto Cond = DecodeNZCVCondition(OP); Cond) {
     // Use raw select since DecodeNZCVCondition handles the carry invert
@@ -937,7 +969,10 @@ void OpDispatchBuilder::JUMPFARIndirectOp(OpcodeArgs) {
   // No way to use this effectively in multiblock
   Ref Src = MakeSegmentAddress(Op, Op->Dest);
   AddressMode SrcCS = {.Base = Src, .Offset = 4, .AddrSize = OpSize::i64Bit};
-  auto RIPOffset = _LoadMemGPRAutoTSO(OpSize::i32Bit, Src, OpSize::i8Bit);
+  // The RIP load dereferences Src directly (a raw Ref), so rebase it. The CS load goes through the
+  // AddressMode overload (SelectAddressMode), which rebases SrcCS.Base itself - don't pre-rebase Src
+  // for that path or it would double-rebase. No-op for a non-wow64 Context.
+  auto RIPOffset = _LoadMemGPRAutoTSO(OpSize::i32Bit, ApplyGuestMemoryRebase(Src), OpSize::i8Bit);
   auto NewSegmentCS = _LoadMemGPRAutoTSO(OpSize::i16Bit, SrcCS, OpSize::i8Bit);
 
   // Set up the new CSSegment.
@@ -958,7 +993,9 @@ void OpDispatchBuilder::CALLFARIndirectOp(OpcodeArgs) {
 
   Ref Src = MakeSegmentAddress(Op, Op->Dest);
   AddressMode SrcCS = {.Base = Src, .Offset = 4, .AddrSize = OpSize::i64Bit};
-  auto RIPOffset = _LoadMemGPRAutoTSO(OpSize::i32Bit, Src, OpSize::i8Bit);
+  // See JUMPFARIndirectOp: rebase only the direct RIP load; the CS load rebases SrcCS.Base via
+  // SelectAddressMode. No-op for a non-wow64 Context.
+  auto RIPOffset = _LoadMemGPRAutoTSO(OpSize::i32Bit, ApplyGuestMemoryRebase(Src), OpSize::i8Bit);
   auto NewSegmentCS = _LoadMemGPRAutoTSO(OpSize::i16Bit, SrcCS, OpSize::i8Bit);
   auto CurrentCS = _LoadContextGPR(OpSize::i16Bit, offsetof(FEXCore::Core::CPUState, cs_idx));
 
@@ -1163,7 +1200,7 @@ void OpDispatchBuilder::XCHGOp(OpcodeArgs) {
   if (DestIsMem(Op)) {
     HandledLock = (Op->Flags & FEXCore::X86Tables::DecodeFlags::FLAG_LOCK) != 0;
 
-    Ref Dest = MakeSegmentAddress(Op, Op->Dest);
+    Ref Dest = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
     if (IsMonoBackpatcherBlock) {
       _MonoBackpatcherWrite(OpSizeFromSrc(Op), Src, Dest);
     } else {
@@ -2502,7 +2539,7 @@ void OpDispatchBuilder::BTOp(OpcodeArgs, uint32_t SrcIndex, BTAction Action) {
 
       if (DestIsLockedMem(Op)) {
         HandledLock = true;
-        Value = _AtomicFetchCLR(OpSize::i8Bit, BitMask, LoadEffectiveAddress(this, Address, GetGPROpSize(), true));
+        Value = _AtomicFetchCLR(OpSize::i8Bit, BitMask, LoadEffectiveAddress(this, Address, GetGPROpSize(), true, false, GuestMemoryRebase()));
       } else {
         Value = _LoadMemGPRAutoTSO(OpSize::i8Bit, Address, OpSize::i8Bit);
 
@@ -2517,7 +2554,7 @@ void OpDispatchBuilder::BTOp(OpcodeArgs, uint32_t SrcIndex, BTAction Action) {
 
       if (DestIsLockedMem(Op)) {
         HandledLock = true;
-        Value = _AtomicFetchOr(OpSize::i8Bit, BitMask, LoadEffectiveAddress(this, Address, GetGPROpSize(), true));
+        Value = _AtomicFetchOr(OpSize::i8Bit, BitMask, LoadEffectiveAddress(this, Address, GetGPROpSize(), true, false, GuestMemoryRebase()));
       } else {
         Value = _LoadMemGPRAutoTSO(OpSize::i8Bit, Address, OpSize::i8Bit);
 
@@ -2532,7 +2569,7 @@ void OpDispatchBuilder::BTOp(OpcodeArgs, uint32_t SrcIndex, BTAction Action) {
 
       if (DestIsLockedMem(Op)) {
         HandledLock = true;
-        Value = _AtomicFetchXor(OpSize::i8Bit, BitMask, LoadEffectiveAddress(this, Address, GetGPROpSize(), true));
+        Value = _AtomicFetchXor(OpSize::i8Bit, BitMask, LoadEffectiveAddress(this, Address, GetGPROpSize(), true, false, GuestMemoryRebase()));
       } else {
         Value = _LoadMemGPRAutoTSO(OpSize::i8Bit, Address, OpSize::i8Bit);
 
@@ -2754,7 +2791,7 @@ void OpDispatchBuilder::NOTOp(OpcodeArgs) {
 
   if (DestIsLockedMem(Op)) {
     HandledLock = true;
-    Ref DestMem = MakeSegmentAddress(Op, Op->Dest);
+    Ref DestMem = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
     // Result unused
     _AtomicFetchXor(Size, MaskConst, DestMem);
   } else if (!Op->Dest.IsGPR()) {
@@ -2810,7 +2847,7 @@ void OpDispatchBuilder::XADDOp(OpcodeArgs) {
     StoreResultGPR(Op, Result);
   } else {
     HandledLock = Op->Flags & FEXCore::X86Tables::DecodeFlags::FLAG_LOCK;
-    Dest = AppendSegmentOffset(Dest, Op->Flags);
+    Dest = ApplyGuestMemoryRebase(AppendSegmentOffset(Dest, Op->Flags));
     auto Before = _AtomicFetchAdd(OpSizeFromSrc(Op), Src, Dest);
     CalculateFlags_ADD(OpSizeFromSrc(Op), Before, Src);
     StoreResultGPR(Op, Op->Src[0], Before);
@@ -2992,7 +3029,15 @@ void OpDispatchBuilder::EnterOp(OpcodeArgs) {
 
   const auto PushValue = [&](IR::OpSize Size, Ref Src) -> Ref {
     auto OldSP = LoadGPRRegister(X86State::REG_RSP);
-    auto NewSP = _Push(GPRSize, Size, Src, OldSP);
+    Ref NewSP;
+    if (GuestMemoryRebase().Rebase) {
+      // The fused _Push dereferences the guest SP directly without WOW64_GUEST_REBASE; decompose so
+      // only the host store address is rebased while RSP keeps a guest value (see Pop() in the header).
+      NewSP = Sub(GPRSize, OldSP, IR::OpSizeToSize(Size));
+      _StoreMemGPRAutoTSO(Size, ApplyGuestMemoryRebase(NewSP), Src);
+    } else {
+      NewSP = _Push(GPRSize, Size, Src, OldSP);
+    }
 
     // Store the new stack pointer
     StoreGPRRegister(X86State::REG_RSP, NewSP);
@@ -3006,7 +3051,7 @@ void OpDispatchBuilder::EnterOp(OpcodeArgs) {
   if (Level > 0) {
     for (uint8_t i = 1; i < Level; ++i) {
       auto MemLoc = Sub(GPRSize, OldBP, i * IR::OpSizeToSize(OperandSize));
-      auto Mem = _LoadMemGPR(OperandSize, MemLoc, OperandSize);
+      auto Mem = _LoadMemGPR(OperandSize, ApplyGuestMemoryRebase(MemLoc), OperandSize);
       NewSP = PushValue(OperandSize, Mem);
     }
     NewSP = PushValue(OperandSize, temp_RBP);
@@ -3035,7 +3080,9 @@ void OpDispatchBuilder::SGDTOp(OpcodeArgs) {
     GDTStoreSize = OpSize::i32Bit;
   }
 
-  _StoreMemGPRAutoTSO(OpSize::i16Bit, DestAddress, Constant(0));
+  // The bare-Ref store dereferences DestAddress directly, so rebase it. The AddressMode store below
+  // rebases DestAddress via SelectAddressMode - leave it un-rebased there to avoid double-rebase.
+  _StoreMemGPRAutoTSO(OpSize::i16Bit, ApplyGuestMemoryRebase(DestAddress), Constant(0));
   _StoreMemGPRAutoTSO(GDTStoreSize, AddressMode {.Base = DestAddress, .Offset = 2, .AddrSize = OpSize::i64Bit}, Constant(GDTAddress));
 }
 
@@ -3051,7 +3098,8 @@ void OpDispatchBuilder::SIDTOp(OpcodeArgs) {
     IDTStoreSize = OpSize::i32Bit;
   }
 
-  _StoreMemGPRAutoTSO(OpSize::i16Bit, DestAddress, Constant(0xfff));
+  // See SGDTOp: rebase only the bare-Ref store; the AddressMode store rebases via SelectAddressMode.
+  _StoreMemGPRAutoTSO(OpSize::i16Bit, ApplyGuestMemoryRebase(DestAddress), Constant(0xfff));
   _StoreMemGPRAutoTSO(IDTStoreSize, AddressMode {.Base = DestAddress, .Offset = 2, .AddrSize = OpSize::i64Bit}, Constant(IDTAddress));
 }
 
@@ -3131,7 +3179,7 @@ void OpDispatchBuilder::INCOp(OpcodeArgs) {
   if (IsLocked) {
     HandledLock = true;
 
-    Ref DestAddress = MakeSegmentAddress(Op, Op->Dest);
+    Ref DestAddress = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
     Dest = _AtomicFetchAdd(OpSizeFromSrc(Op), Constant(1), DestAddress);
   } else {
     Dest = LoadSourceGPR(Op, Op->Dest, Op->Flags, {.AllowUpperGarbage = Size >= 32});
@@ -3170,7 +3218,7 @@ void OpDispatchBuilder::DECOp(OpcodeArgs) {
   if (IsLocked) {
     HandledLock = true;
 
-    Ref DestAddress = MakeSegmentAddress(Op, Op->Dest);
+    Ref DestAddress = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
 
     // Use Add instead of Sub to avoid a NEG
     Dest = _AtomicFetchAdd(OpSizeFromSrc(Op), Constant(Size == 64 ? -1 : ((1ULL << Size) - 1)), DestAddress);
@@ -3217,7 +3265,7 @@ void OpDispatchBuilder::STOSOp(OpcodeArgs) {
     Ref Src = LoadSourceGPR(Op, Op->Src[0], Op->Flags, {.AllowUpperGarbage = true});
 
     // Only ES prefix
-    Ref Dest = MakeSegmentAddress(X86State::REG_RDI, 0, X86Tables::DecodeFlags::FLAG_ES_PREFIX, true);
+    Ref Dest = ApplyGuestMemoryRebase(MakeSegmentAddress(X86State::REG_RDI, 0, X86Tables::DecodeFlags::FLAG_ES_PREFIX, true));
 
     // Store to memory where RDI points
     if (CTX->IsMemcpyAtomicTSOEnabled()) {
@@ -3241,7 +3289,16 @@ void OpDispatchBuilder::STOSOp(OpcodeArgs) {
 
     Ref Counter = LoadGPRRegister(X86State::REG_RCX);
 
-    auto Result = _MemSet(CTX->IsAtomicTSOEnabled(), Size, Segment ?: InvalidNode, Dest, Src, Counter, LoadDir(1));
+    // Fold the wow64 guest rebase into the MemSet prefix (added to the store pointer, never to the
+    // returned RDI address - so RDI stays a guest address). No-op for a non-wow64 Context. See
+    // ApplyGuestMemoryRebase's doc comment for why this direct-dereference path needs it.
+    Ref RebaseAddend = GuestMemoryRebaseAddend(Dest);
+    Ref Prefix = Segment;
+    if (RebaseAddend) {
+      Prefix = Prefix ? Add(OpSize::i64Bit, Prefix, RebaseAddend) : RebaseAddend;
+    }
+
+    auto Result = _MemSet(CTX->IsAtomicTSOEnabled(), Size, Prefix ?: InvalidNode, Dest, Src, Counter, LoadDir(1));
     StoreGPRRegister(X86State::REG_RCX, Constant(0));
     StoreGPRRegister(X86State::REG_RDI, Result);
   }
@@ -3273,9 +3330,29 @@ void OpDispatchBuilder::MOVSOp(OpcodeArgs) {
       SrcAddr = Add(OpSize::i64Bit, SrcAddr, SrcSegment);
     }
 
+    // Fold the wow64 guest rebase into the src/dst addresses that _MemCpy dereferences, then subtract
+    // the same SSA addend back from the returned pointers so RSI/RDI stay guest addresses (mirrors the
+    // segment fold/subtract just above/below). No-op for a non-wow64 Context. See ApplyGuestMemoryRebase's
+    // doc comment.
+    Ref DstRebase = GuestMemoryRebaseAddend(DstAddr);
+    Ref SrcRebase = GuestMemoryRebaseAddend(SrcAddr);
+    if (DstRebase) {
+      DstAddr = Add(OpSize::i64Bit, DstAddr, DstRebase);
+    }
+    if (SrcRebase) {
+      SrcAddr = Add(OpSize::i64Bit, SrcAddr, SrcRebase);
+    }
+
     Ref Result_Src = _AllocateGPR(false);
     Ref Result_Dst = _AllocateGPR(false);
     _MemCpy(CTX->IsAtomicTSOEnabled(), Size, DstAddr, SrcAddr, Counter, LoadDir(1), Result_Dst, Result_Src);
+
+    if (DstRebase) {
+      Result_Dst = Sub(OpSize::i64Bit, Result_Dst, DstRebase);
+    }
+    if (SrcRebase) {
+      Result_Src = Sub(OpSize::i64Bit, Result_Src, SrcRebase);
+    }
 
     if (DstSegment) {
       Result_Dst = Sub(OpSize::i64Bit, Result_Dst, DstSegment);
@@ -3289,8 +3366,12 @@ void OpDispatchBuilder::MOVSOp(OpcodeArgs) {
     StoreGPRRegister(X86State::REG_RDI, Result_Dst);
     StoreGPRRegister(X86State::REG_RSI, Result_Src);
   } else {
-    Ref RSI = MakeSegmentAddress(X86State::REG_RSI, Op->Flags, X86Tables::DecodeFlags::FLAG_DS_PREFIX);
-    Ref RDI = MakeSegmentAddress(X86State::REG_RDI, 0, X86Tables::DecodeFlags::FLAG_ES_PREFIX, true);
+    Ref RSIGuest = MakeSegmentAddress(X86State::REG_RSI, Op->Flags, X86Tables::DecodeFlags::FLAG_DS_PREFIX);
+    Ref RDIGuest = MakeSegmentAddress(X86State::REG_RDI, 0, X86Tables::DecodeFlags::FLAG_ES_PREFIX, true);
+
+    // Rebase for the actual accesses; the register writeback below advances the *guest* addresses.
+    Ref RSI = ApplyGuestMemoryRebase(RSIGuest);
+    Ref RDI = ApplyGuestMemoryRebase(RDIGuest);
 
     if (CTX->IsMemcpyAtomicTSOEnabled()) {
       auto Src = _LoadMemGPRAutoTSO(Size, RSI, Size);
@@ -3302,11 +3383,11 @@ void OpDispatchBuilder::MOVSOp(OpcodeArgs) {
       _StoreMem(RegClass::GPR, Size, Src, RDI, Invalid(), OpSize::i8Bit, MemOffsetType::SXTX, 1);
     }
 
-    RSI = OffsetByDir(RSI, IR::OpSizeToSize(Size));
-    RDI = OffsetByDir(RDI, IR::OpSizeToSize(Size));
+    RSIGuest = OffsetByDir(RSIGuest, IR::OpSizeToSize(Size));
+    RDIGuest = OffsetByDir(RDIGuest, IR::OpSizeToSize(Size));
 
-    StoreGPRRegister(X86State::REG_RSI, RSI);
-    StoreGPRRegister(X86State::REG_RDI, RDI);
+    StoreGPRRegister(X86State::REG_RSI, RSIGuest);
+    StoreGPRRegister(X86State::REG_RDI, RDIGuest);
   }
 }
 
@@ -3330,8 +3411,8 @@ void OpDispatchBuilder::CMPSOp(OpcodeArgs) {
     Ref Src_RSI = LoadGPRRegister(X86State::REG_RSI, AddrSize);
     Ref Src_RDI = LoadGPRRegister(X86State::REG_RDI, AddrSize);
 
-    Ref Dest_RSI = AppendSegmentOffset(Src_RSI, Op->Flags, X86Tables::DecodeFlags::FLAG_DS_PREFIX);
-    Ref Dest_RDI = AppendSegmentOffset(Src_RDI, 0, X86Tables::DecodeFlags::FLAG_ES_PREFIX, true);
+    Ref Dest_RSI = ApplyGuestMemoryRebase(AppendSegmentOffset(Src_RSI, Op->Flags, X86Tables::DecodeFlags::FLAG_DS_PREFIX));
+    Ref Dest_RDI = ApplyGuestMemoryRebase(AppendSegmentOffset(Src_RDI, 0, X86Tables::DecodeFlags::FLAG_ES_PREFIX, true));
 
     auto Src1 = _LoadMemGPRAutoTSO(Size, Dest_RDI, Size);
     auto Src2 = _LoadMemGPRAutoTSO(Size, Dest_RSI, Size);
@@ -3383,8 +3464,8 @@ void OpDispatchBuilder::CMPSOp(OpcodeArgs) {
         Ref Src_RSI = LoadGPRRegister(X86State::REG_RSI, AddrSize);
         Ref Src_RDI = LoadGPRRegister(X86State::REG_RDI, AddrSize);
 
-        Ref Dest_RSI = AppendSegmentOffset(Src_RSI, Op->Flags, X86Tables::DecodeFlags::FLAG_DS_PREFIX);
-        Ref Dest_RDI = AppendSegmentOffset(Src_RDI, 0, X86Tables::DecodeFlags::FLAG_ES_PREFIX, true);
+        Ref Dest_RSI = ApplyGuestMemoryRebase(AppendSegmentOffset(Src_RSI, Op->Flags, X86Tables::DecodeFlags::FLAG_DS_PREFIX));
+        Ref Dest_RDI = ApplyGuestMemoryRebase(AppendSegmentOffset(Src_RDI, 0, X86Tables::DecodeFlags::FLAG_ES_PREFIX, true));
 
         auto Src1 = _LoadMemGPRAutoTSO(Size, Dest_RDI, Size);
         auto Src2 = _LoadMemGPR(Size, Dest_RSI, Size);
@@ -3466,7 +3547,7 @@ void OpDispatchBuilder::LODSOp(OpcodeArgs) {
 
   if (!Repeat) {
     Ref Src_RSI = LoadGPRRegister(X86State::REG_RSI, AddrSize);
-    Ref Dest_RSI = AppendSegmentOffset(Src_RSI, 0, X86Tables::DecodeFlags::FLAG_DS_PREFIX, true);
+    Ref Dest_RSI = ApplyGuestMemoryRebase(AppendSegmentOffset(Src_RSI, 0, X86Tables::DecodeFlags::FLAG_DS_PREFIX, true));
 
     auto Src = _LoadMemGPRAutoTSO(Size, Dest_RSI, Size);
 
@@ -3513,7 +3594,7 @@ void OpDispatchBuilder::LODSOp(OpcodeArgs) {
       // Working loop
       {
         Ref Src_RSI = LoadGPRRegister(X86State::REG_RSI, AddrSize);
-        Ref Dest_RSI = AppendSegmentOffset(Src_RSI, 0, X86Tables::DecodeFlags::FLAG_DS_PREFIX, true);
+        Ref Dest_RSI = ApplyGuestMemoryRebase(AppendSegmentOffset(Src_RSI, 0, X86Tables::DecodeFlags::FLAG_DS_PREFIX, true));
 
         auto Src = _LoadMemGPRAutoTSO(Size, Dest_RSI, Size);
 
@@ -3562,7 +3643,7 @@ void OpDispatchBuilder::SCASOp(OpcodeArgs) {
 
   if (!Repeat) {
     Ref Src_RDI = LoadGPRRegister(X86State::REG_RDI, AddrSize);
-    Ref Dest_RDI = AppendSegmentOffset(Src_RDI, 0, X86Tables::DecodeFlags::FLAG_ES_PREFIX, true);
+    Ref Dest_RDI = ApplyGuestMemoryRebase(AppendSegmentOffset(Src_RDI, 0, X86Tables::DecodeFlags::FLAG_ES_PREFIX, true));
 
     auto Src1 = LoadSourceGPR(Op, Op->Src[0], Op->Flags, {.AllowUpperGarbage = true});
     auto Src2 = _LoadMemGPRAutoTSO(Size, Dest_RDI, Size);
@@ -3605,7 +3686,7 @@ void OpDispatchBuilder::SCASOp(OpcodeArgs) {
       // Working loop
       {
         Ref Src_RDI = LoadGPRRegister(X86State::REG_RDI, AddrSize);
-        Ref Dest_RDI = AppendSegmentOffset(Src_RDI, 0, X86Tables::DecodeFlags::FLAG_ES_PREFIX, true);
+        Ref Dest_RDI = ApplyGuestMemoryRebase(AppendSegmentOffset(Src_RDI, 0, X86Tables::DecodeFlags::FLAG_ES_PREFIX, true));
 
         auto Src1 = LoadSourceGPR(Op, Op->Src[0], Op->Flags, {.AllowUpperGarbage = true});
         auto Src2 = _LoadMemGPRAutoTSO(Size, Dest_RDI, Size);
@@ -3693,7 +3774,7 @@ void OpDispatchBuilder::NEGOp(OpcodeArgs) {
   auto ZeroConst = Constant(0);
 
   if (DestIsLockedMem(Op)) {
-    Ref DestMem = MakeSegmentAddress(Op, Op->Dest);
+    Ref DestMem = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
     Ref Dest = _AtomicFetchNeg(Size, DestMem);
     CalculateFlags_SUB(Size, ZeroConst, Dest);
   } else {
@@ -3907,7 +3988,7 @@ void OpDispatchBuilder::CMPXCHGOp(OpcodeArgs) {
     auto Src3Lower = _Bfe(OpSize::i64Bit, OpSizeAsBits(Size), 0, Src3);
 
     // If this is a memory location then we want the pointer to it
-    Ref Src1 = MakeSegmentAddress(Op, Op->Dest);
+    Ref Src1 = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
 
     // DataSrc = *Src1
     // if (DataSrc == Src3) { *Src1 == Src2; } Src2 = DataSrc
@@ -3941,7 +4022,7 @@ void OpDispatchBuilder::CMPXCHGPairOp(OpcodeArgs) {
   HandledLock = (Op->Flags & FEXCore::X86Tables::DecodeFlags::FLAG_LOCK) != 0;
 
   // If this is a memory location then we want the pointer to it
-  Ref Src1 = MakeSegmentAddress(Op, Op->Dest);
+  Ref Src1 = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
 
   // Load the full 64-bit registers, all the users ignore the upper 32-bits for
   // 32-bit only cmpxchg. This saves some zero extension.
@@ -4445,7 +4526,7 @@ Ref OpDispatchBuilder::LoadSource_WithOpSize(RegClass Class, const X86Tables::De
   const bool ShouldLoad = (IsOperandMem(Operand, true) && LoadData) || ForceLoad;
   if (ShouldLoad) {
     if (OpSize == OpSize::f80Bit) {
-      Ref MemSrc = LoadEffectiveAddress(this, A, GetGPROpSize(), true);
+      Ref MemSrc = LoadEffectiveAddress(this, A, GetGPROpSize(), true, false, GuestMemoryRebase());
       if (CTX->HostFeatures.SupportsSVE128 || CTX->HostFeatures.SupportsSVE256) {
         Result = _LoadMemX87SVEOptPredicate(OpSize::i128Bit, OpSize::i16Bit, MemSrc);
       } else {
@@ -4457,7 +4538,7 @@ Ref OpDispatchBuilder::LoadSource_WithOpSize(RegClass Class, const X86Tables::De
       Result = _LoadMemAutoTSO(Class, OpSize, A, Align == OpSize::iInvalid ? OpSize : Align);
     }
   } else {
-    Result = LoadEffectiveAddress(this, A, GetGPROpSize(), false, AllowUpperGarbage);
+    Result = LoadEffectiveAddress(this, A, GetGPROpSize(), false, AllowUpperGarbage, GuestMemoryRebase());
   }
 
   if constexpr (Context::BLOCK_DEBUGGING) {
@@ -4584,7 +4665,7 @@ void OpDispatchBuilder::StoreResult_WithOpSize(RegClass Class, FEXCore::X86Table
   AddressMode A = DecodeAddress(Op, Operand, AccessType, false /* IsLoad */);
 
   if (OpSize == OpSize::f80Bit) {
-    Ref MemStoreDst = LoadEffectiveAddress(this, A, GetGPROpSize(), true);
+    Ref MemStoreDst = LoadEffectiveAddress(this, A, GetGPROpSize(), true, false, GuestMemoryRebase());
     if (CTX->HostFeatures.SupportsSVE128 || CTX->HostFeatures.SupportsSVE256) {
       _StoreMemX87SVEOptPredicate(OpSize::i128Bit, OpSize::i16Bit, Src, MemStoreDst);
     } else {
@@ -4722,7 +4803,7 @@ void OpDispatchBuilder::ALUOp(OpcodeArgs, FEXCore::IR::IROps ALUIROp, FEXCore::I
 
   if (DestIsLockedMem(Op)) {
     HandledLock = true;
-    Ref DestMem = MakeSegmentAddress(Op, Op->Dest);
+    Ref DestMem = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
     DeriveOp(FetchOp, AtomicFetchOp, _AtomicFetchAdd(Size, Src, DestMem));
     Dest = FetchOp;
   } else {
@@ -4934,7 +5015,7 @@ void OpDispatchBuilder::MOVBEOp(OpcodeArgs) {
 
 void OpDispatchBuilder::CLWBOrTPause(OpcodeArgs) {
   if (DestIsMem(Op)) {
-    Ref DestMem = MakeSegmentAddress(Op, Op->Dest);
+    Ref DestMem = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
     _CacheLineClean(DestMem);
   } else {
     if (!CTX->HostFeatures.SupportsWFXT) {
@@ -4955,7 +5036,7 @@ void OpDispatchBuilder::CLWBOrTPause(OpcodeArgs) {
 }
 
 void OpDispatchBuilder::CLFLUSHOPT(OpcodeArgs) {
-  Ref DestMem = MakeSegmentAddress(Op, Op->Dest);
+  Ref DestMem = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
   _CacheLineClear(DestMem, false);
 }
 
@@ -4983,7 +5064,7 @@ void OpDispatchBuilder::StoreFenceOrCLFlush(OpcodeArgs) {
     _Fence(FenceType::Store);
   } else {
     // This is a CLFlush
-    Ref DestMem = MakeSegmentAddress(Op, Op->Dest);
+    Ref DestMem = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
     _CacheLineClear(DestMem, true);
   }
 }
@@ -5015,7 +5096,7 @@ void OpDispatchBuilder::CLZeroOp(OpcodeArgs) {
     UnimplementedOp(Op);
     return;
   }
-  Ref DestMem = LoadSourceGPR(Op, Op->Src[0], Op->Flags, {.LoadData = false});
+  Ref DestMem = ApplyGuestMemoryRebase(LoadSourceGPR(Op, Op->Src[0], Op->Flags, {.LoadData = false}));
   _CacheLineZero(DestMem);
 }
 
@@ -5025,7 +5106,7 @@ void OpDispatchBuilder::Prefetch(OpcodeArgs, bool ForStore, bool Stream, uint8_t
     return;
   }
 
-  Ref DestMem = LoadSourceGPR(Op, Op->Src[0], Op->Flags, {.LoadData = false});
+  Ref DestMem = ApplyGuestMemoryRebase(LoadSourceGPR(Op, Op->Src[0], Op->Flags, {.LoadData = false}));
   _Prefetch(ForStore, Stream, Level, DestMem, Invalid(), MemOffsetType::SXTX, 1);
 }
 

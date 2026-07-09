@@ -182,7 +182,12 @@ private:
                    .IndexType = MemOffsetType::SXTX,
                    .IndexScale = OffsetScale,
                    .AddrSize = OpSize::i64Bit};
-    A = SelectAddressMode(IREmit, A, GPROpSize, Features.SupportsTSOImm9, false, false, OpSize::i16Bit);
+    // AddrNode is the already-rebased 64-bit host pointer, so this +8 must be added at 64-bit width.
+    // Passing GPROpSize (i32 in WOW64 mode) makes GPRSize != A.AddrSize, forcing SelectAddressMode's
+    // fallback to emit Add(i32, base, 8), which truncates the WOW64_GUEST_REBASE (bits 32+) and stores
+    // the upper 16 bits of an 80-bit value to the un-rebased low guest VA -> SIGSEGV. Use i64Bit
+    // (== A.AddrSize) so the offset add stays 64-bit; a no-op in true 64-bit mode where GPROpSize is i64.
+    A = SelectAddressMode(IREmit, A, OpSize::i64Bit, Features.SupportsTSOImm9, false, false, OpSize::i16Bit);
     IREmit->_StoreMemGPR(OpSize::i16Bit, Upper, A.Base, A.Index, OpSize::i64Bit, MemOffsetType::SXTX, A.IndexScale);
   }
 

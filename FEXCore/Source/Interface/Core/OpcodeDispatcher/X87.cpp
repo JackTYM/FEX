@@ -129,7 +129,7 @@ void OpDispatchBuilder::FST(OpcodeArgs, IR::OpSize Width) {
   const auto SourceSize = ReducedPrecisionMode ? OpSize::i64Bit : OpSize::f80Bit;
   AddressMode A = DecodeAddress(Op, Op->Dest, MemoryAccessType::DEFAULT, false);
 
-  A = SelectAddressMode(this, A, GetGPROpSize(), CTX->HostFeatures.SupportsTSOImm9, false, false, Width);
+  A = SelectAddressMode(this, A, GetGPROpSize(), CTX->HostFeatures.SupportsTSOImm9, false, false, Width, GuestMemoryRebase());
   _StoreStackMem(SourceSize, Width, A.Base, A.Index, OpSize::iInvalid, A.IndexType, A.IndexScale);
 
   if (Op->TableInfo->Flags & X86Tables::InstFlags::FLAGS_POP) {
@@ -381,7 +381,7 @@ void OpDispatchBuilder::X87FNSTENV(OpcodeArgs) {
 
   const auto Size = OpSizeFromSrc(Op);
   Ref Mem = LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false});
-  Mem = AppendSegmentOffset(Mem, Op->Flags);
+  Mem = ApplyGuestMemoryRebase(AppendSegmentOffset(Mem, Op->Flags));
 
   {
     auto FCW = _LoadContextGPR(OpSize::i16Bit, offsetof(FEXCore::Core::CPUState, FCW));
@@ -441,7 +441,7 @@ void OpDispatchBuilder::X87LDENV(OpcodeArgs) {
 
   const auto Size = OpSizeFromSrc(Op);
   Ref Mem = LoadSourceGPR(Op, Op->Src[0], Op->Flags, {.LoadData = false});
-  Mem = AppendSegmentOffset(Mem, Op->Flags);
+  Mem = ApplyGuestMemoryRebase(AppendSegmentOffset(Mem, Op->Flags));
 
   auto NewFCW = _LoadMemGPR(OpSize::i16Bit, Mem, OpSize::i16Bit);
   _StoreContextGPR(OpSize::i16Bit, NewFCW, offsetof(FEXCore::Core::CPUState, FCW));
@@ -479,7 +479,7 @@ void OpDispatchBuilder::X87FNSAVE(OpcodeArgs) {
   // 4 bytes : data pointer offset
   // 4 bytes : data pointer selector
   const auto Size = OpSizeFromDst(Op);
-  Ref Mem = MakeSegmentAddress(Op, Op->Dest);
+  Ref Mem = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Dest));
   Ref Top = GetX87Top();
   {
     auto FCW = _LoadContextGPR(OpSize::i16Bit, offsetof(FEXCore::Core::CPUState, FCW));
@@ -545,7 +545,7 @@ void OpDispatchBuilder::X87FNSAVE(OpcodeArgs) {
 void OpDispatchBuilder::X87FRSTOR(OpcodeArgs) {
   _StackForceSlow();
   const auto Size = OpSizeFromSrc(Op);
-  Ref Mem = MakeSegmentAddress(Op, Op->Src[0]);
+  Ref Mem = ApplyGuestMemoryRebase(MakeSegmentAddress(Op, Op->Src[0]));
 
   auto NewFCW = _LoadMemGPR(OpSize::i16Bit, Mem, OpSize::i16Bit);
   _StoreContextGPR(OpSize::i16Bit, NewFCW, offsetof(FEXCore::Core::CPUState, FCW));

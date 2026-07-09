@@ -328,6 +328,9 @@ public:
     // Used if the JIT needs to have its interrupt fault code emitted.
     bool NeedsPendingInterruptFaultCheck {false};
 
+    // sogen/macOS-specific: see SetNeedsWow64GuestRebase's doc comment (public Context.h).
+    bool NeedsWow64GuestRebase {false};
+
     FEX_CONFIG_OPT(Multiblock, MULTIBLOCK);
     FEX_CONFIG_OPT(SingleStepConfig, SINGLESTEP);
     FEX_CONFIG_OPT(GdbServer, GDBSERVER);
@@ -424,6 +427,10 @@ public:
   void SetHardwareTSOSupport(bool HardwareTSOSupported) override {
     SupportsHardwareTSO = HardwareTSOSupported;
     UpdateAtomicTSOEmulationConfig();
+  }
+
+  void SetNeedsWow64GuestRebase(bool NeedsRebase) override {
+    Config.NeedsWow64GuestRebase = NeedsRebase;
   }
 
   void EnableExitOnHLT() override {

@@ -45,6 +45,13 @@ class RegisterAllocationPass;
 }
 
 namespace FEXCore::CPU {
+// Independent, executing-thread anchor for Arm64JITCore::ExitFunctionLink. That function is static
+// (no `this`) and is entered from JIT-emitted link thunks with only Frame/Record as inputs, so to
+// validate a possibly-corrupt Frame it needs a trusted Thread reference that is NOT obtained by
+// dereferencing that Frame. Set at the top of ContextImpl::ExecuteThread, which always runs on the
+// host thread that subsequently executes this guest thread's JIT (and its link dispatches).
+extern thread_local FEXCore::Core::InternalThreadState* ExitLinkTrustedThread;
+
 class Arm64JITCore final : public CPUBackend, public Arm64Emitter {
 public:
   explicit Arm64JITCore(FEXCore::Context::ContextImpl* ctx, FEXCore::Core::InternalThreadState* Thread);

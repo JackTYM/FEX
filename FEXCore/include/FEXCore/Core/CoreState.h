@@ -429,6 +429,28 @@ struct CpuStateFrame {
   uint32_t SuspendDoorbell {};
 #endif
 
+  // DEBUG AID (kept intentionally, cheap): captures STATE's own value the moment ExitFunctionLinkerAddress's trampoline is
+  // entered (before SpillStaticRegs/any other work), to check whether it's already wrong at that
+  // point vs. becoming wrong later. Read from the embedder's crash handler.
+  uint64_t DebugLastExitLinkerState {};
+  // DEBUG AID (kept intentionally, cheap): captures STATE's own value right after SpillStaticRegs returns, still inside the
+  // same trampoline - narrows whether the corruption happens inside SpillStaticRegs or after it.
+  uint64_t DebugLastExitLinkerStateAfterSpill {};
+  // DEBUG AID (kept intentionally, cheap): captures x0 immediately after `mov(x0, STATE)`, still using STATE as the store base
+  // (unchanged by the mov) - narrows whether the mov itself is where the value goes wrong.
+  uint64_t DebugX0AfterMov {};
+  // DEBUG AID (kept intentionally, cheap): captures x0 and the x2 branch target right before the blr into
+  // Pointers.ExitFunctionLink - the last checkpoint before the actual call.
+  uint64_t DebugX0BeforeCall {};
+  // DEBUG AID (kept intentionally, cheap): the GuestRIP of the last block ContextImpl::CompileBlock successfully compiled (set
+  // right before its success return, Core.cpp) - since a failing compile (e.g. NoExecOp on an
+  // unmapped/non-executable target) never reaches that point, this still holds the previous,
+  // genuinely-executed block's entry address at crash time - the closest thing to "where execution
+  // was coming from" for a synthetic-#PF-style crash, where the faulting RIP itself is already
+  // overwritten with the bad target by the time any handler observes it.
+  uint64_t DebugLastCompiledGuestRip {};
+  uint64_t DebugX2BeforeCall {};
+
   // Pointers that the JIT needs to load to remove relocations
   JITPointers Pointers;
 };

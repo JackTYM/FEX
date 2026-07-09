@@ -80,6 +80,8 @@ static void PrintVectorValue(uint64_t Value, uint64_t ValueUpper) {
 
 namespace FEXCore::CPU {
 
+thread_local FEXCore::Core::InternalThreadState* ExitLinkTrustedThread {};
+
 void Arm64JITCore::Op_Unhandled(const IR::IROp_Header* IROp, IR::Ref Node) {
   FallbackInfo Info;
   if (!InterpreterOps::GetFallbackHandler(IROp, &Info)) {
@@ -530,6 +532,37 @@ static void IndirectBlockDelinker(FEXCore::Context::ExitFunctionLinkData* Record
 }
 
 uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEXCore::Context::ExitFunctionLinkData* Record) {
+  // Defensive validate-and-correct backstop (see plan swift-painting-avalanche.md). This static entry
+  // is reached from JIT-emitted link thunks with only Frame/Record as inputs. A downstream failure
+  // class has been observed where a dispatch here proceeds on a corrupt Frame or Record and silently
+  // produces plausible-but-wrong guest state that only faults much later, elsewhere. Validate both
+  // against trusted references before dereferencing them:
+  //   - Frame must equal the executing thread's CurrentFrame (a const, never-reassigned mirror reached
+  //     via the ExitLinkTrustedThread anchor, independent of the possibly-corrupt Frame argument).
+  //   - Record must lie inside this thread's JIT code buffer (the ExitFunctionLinkData struct is
+  //     emitted inline there); otherwise JumpThunkStartAddress/CallerAddress would be a wild
+  //     self-modifying write and Record->GuestRIP a wild read.
+  // Both checks are branch-cheap and the diagnostic path is cold. When the anchor is unavailable the
+  // guard is skipped entirely, so behavior is never worse than baseline.
+  if (auto* TrustedThread = ExitLinkTrustedThread) {
+    if (Frame != TrustedThread->CurrentFrame) {
+      char Buf[160];
+      auto Len = snprintf(Buf, sizeof(Buf), "[FEX ExitFunctionLink] Frame %p != trusted %p; substituting trusted frame\n",
+                          static_cast<void*>(Frame), static_cast<void*>(TrustedThread->CurrentFrame));
+      write(STDERR_FILENO, Buf, Len);
+      Frame = TrustedThread->CurrentFrame;
+    }
+    if (!TrustedThread->CPUBackend.get()->IsAddressInCodeBuffer(reinterpret_cast<uintptr_t>(Record))) {
+      char Buf[160];
+      auto Len = snprintf(Buf, sizeof(Buf), "[FEX ExitFunctionLink] Record %p outside code buffer; bailing to dispatcher loop top\n",
+                          static_cast<void*>(Record));
+      write(STDERR_FILENO, Buf, Len);
+      // No trustworthy GuestRIP can be recovered from a corrupt Record, so re-dispatch from the
+      // trusted frame's current rip rather than linking or jumping to a computed-from-garbage target.
+      return Frame->Pointers.DispatcherLoopTop;
+    }
+  }
+
   auto Thread = Frame->Thread;
   bool TFSet = Thread->CurrentFrame->State.flags[X86State::RFLAG_TF_RAW_LOC];
   uintptr_t HostCode {};
@@ -552,6 +585,17 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
       HostCode = static_cast<Context::ContextImpl*>(Thread->CTX)->CompileBlock(Frame, GuestRip, 0);
       if (Thread->LookupCache->Shared != CodeBuffer->LookupCache.get()) {
         return HostCode;
+      }
+
+      if (!HostCode) {
+        // CompileBlock can return 0 (e.g. if GenerateIR bailed) - falling through would compute a
+        // callsite branch patch from a HostCode of 0 and return 0 to the caller, which blindly
+        // jumps to whatever it's given (see the callsite in Dispatcher.cpp): both the patched
+        // callsite and this return would send execution to address 0. Redirect the same way the
+        // TFSet case above already does instead: let the dispatcher retry from its own loop top
+        // with the correct guest rip, rather than linking or jumping to a null target.
+        Frame->State.rip = GuestRip;
+        return Frame->Pointers.DispatcherLoopTop;
       }
     }
   }

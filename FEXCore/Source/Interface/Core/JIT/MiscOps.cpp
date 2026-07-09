@@ -234,12 +234,21 @@ DEF_OP(ProcessorID) {
     mrs(GetReg(Node), ARMEmitter::SystemRegister::TPIDRRO_EL0);
     return;
   }
-#if defined(_WIN32) || defined(__APPLE__)
+#if defined(__APPLE__)
   else {
-    // If TPIDRRO isn't supported (like in wine, or here on Apple), then this is a programming
-    // error. The Linux fallback below emits a raw `svc(0)` trap with a hardcoded Linux getcpu
-    // syscall number, which has no Darwin equivalent (different syscall ABI entirely) - so Apple
-    // follows the same precedent Windows already set rather than guessing at a Darwin syscall path.
+    // Apple Silicon doesn't populate the CPU index in TPIDRRO_EL0, and Darwin has no getcpu
+    // syscall equivalent to the Linux fallback below (different syscall ABI entirely). Report a
+    // fixed CPU 0 / node 0: the Linux path formats the result as Res = (node << 12) | cpu, so the
+    // single-CPU answer is a constant 0. This is a valid (if unoptimized) result for RDPID/RDTSCP
+    // callers; e.g. ntdll's RtlQueryPerformanceCounter uses RDTSCP purely for the TSC in EDX:EAX
+    // and discards the processor id in ECX. Dying here (as the code previously did) turned every
+    // guest RDTSCP into a hard FEXCore abort during loader init.
+    LoadConstant(ARMEmitter::Size::i64Bit, GetReg(Node), 0);
+  }
+#elif defined(_WIN32)
+  else {
+    // wine/arm64ec: same TPIDRRO gap, but the Windows port has not been validated with the
+    // constant-0 fallback, so preserve its existing behavior.
     ERROR_AND_DIE_FMT("Unsupported");
   }
 #else

@@ -288,12 +288,29 @@ void Dispatcher::EmitDispatcher() {
   {
     ExitFunctionLinkerAddress = GetCursorAddress<uint64_t>();
     EmitSignalGuardedRegion([&]() {
+      // DEBUG AID (kept intentionally, cheap): capture STATE's own value before anything else runs, so the embedder's crash
+      // handler can tell whether it was already wrong at trampoline entry vs. became wrong later.
+      str(STATE, STATE_PTR(CpuStateFrame, DebugLastExitLinkerState));
+
       SpillStaticRegs(TMP1);
 
+      // DEBUG AID (kept intentionally, cheap): second capture, right after SpillStaticRegs, before STATE is copied into x0.
+      str(STATE, STATE_PTR(CpuStateFrame, DebugLastExitLinkerStateAfterSpill));
+
       mov(ARMEmitter::XReg::x0, STATE);
+
+      // DEBUG AID (kept intentionally, cheap): third capture, right after x0 is loaded from STATE - narrows whether the mov
+      // itself is where the value diverges (STATE, used as the store base, is untouched by the mov).
+      str(ARMEmitter::XReg::x0, STATE_PTR(CpuStateFrame, DebugX0AfterMov));
+
       mov(ARMEmitter::XReg::x1, ARMEmitter::XReg::lr);
 
       ldr(ARMEmitter::XReg::x2, STATE_PTR(CpuStateFrame, Pointers.ExitFunctionLink));
+
+      // DEBUG AID (kept intentionally, cheap): fourth capture, right before the actual call - the last checkpoint before blr.
+      str(ARMEmitter::XReg::x0, STATE_PTR(CpuStateFrame, DebugX0BeforeCall));
+      str(ARMEmitter::XReg::x2, STATE_PTR(CpuStateFrame, DebugX2BeforeCall));
+
       if (!CTX->Config.DisableVixlIndirectCalls) [[unlikely]] {
         GenerateIndirectRuntimeCall<uintptr_t, void*, void*>(ARMEmitter::Reg::r2);
       } else {
@@ -341,6 +358,14 @@ void Dispatcher::EmitDispatcher() {
       FillStaticRegs();
     });
 
+    // Guard against CompileBlock (via GenerateIR) failing and returning a null host code pointer -
+    // ContextImpl::CompileBlock explicitly returns 0 in that case (Core.cpp), and jumping there
+    // unconditionally would branch straight to address 0. A guest RIP that's genuinely never
+    // compilable would already have been caught by FEXCore's own synthetic-exception mechanism
+    // before reaching here, so a failure here is most plausibly a transient condition (e.g. a race
+    // with guest memory becoming readable/mapped) - retry from the top instead of crashing.
+    (void)cbz(ARMEmitter::Size::i64Bit, TMP1, &LoopTop);
+
     // Jump to the compiled block
     br(TMP1);
   }
@@ -373,6 +398,9 @@ void Dispatcher::EmitDispatcher() {
 
       FillStaticRegs();
     });
+
+    // See the identical guard in the NoBlock handler above for why this is needed.
+    (void)cbz(ARMEmitter::Size::i64Bit, TMP1, &LoopTop);
 
     // Jump to the compiled block
     br(TMP1);
