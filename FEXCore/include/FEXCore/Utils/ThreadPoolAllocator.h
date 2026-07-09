@@ -417,8 +417,16 @@ public:
 private:
   void* Alloc(size_t Size) override {
     auto Ptr = FEXCore::Allocator::VirtualAlloc(Size);
-    uintptr_t LastPageAddr = AlignDown(reinterpret_cast<uintptr_t>(Ptr) + Size - 1, FEXCore::Utils::FEX_PAGE_SIZE);
-    if (!FEXCore::Allocator::VirtualProtect(reinterpret_cast<void*>(LastPageAddr), FEXCore::Utils::FEX_PAGE_SIZE,
+    // Use FEX_HOST_PAGE_SIZE (not FEX_PAGE_SIZE) for both the alignment and the protect length: the
+    // host's actual mprotect()/mmap() granularity is 16KB on Apple Silicon, and protecting a
+    // FEX_PAGE_SIZE (4KB)-sized region at a FEX_PAGE_SIZE-aligned address either fails outright
+    // (unaligned start address) or under-protects (only a quarter of the real 16KB host page marked
+    // PROT_NONE) there. `Size` itself must be a multiple of FEX_HOST_PAGE_SIZE AND at least
+    // 2*FEX_HOST_PAGE_SIZE for this to land the guard at the buffer's own tail rather than at Ptr
+    // itself (which would swallow the whole buffer as "guard" and leave zero usable bytes) - see
+    // JIT.cpp's DesiredBufferRange, which guarantees both.
+    uintptr_t LastPageAddr = AlignDown(reinterpret_cast<uintptr_t>(Ptr) + Size - 1, FEXCore::Utils::FEX_HOST_PAGE_SIZE);
+    if (!FEXCore::Allocator::VirtualProtect(reinterpret_cast<void*>(LastPageAddr), FEXCore::Utils::FEX_HOST_PAGE_SIZE,
                                             FEXCore::Allocator::ProtectOptions::None)) {
       LogMan::Msg::EFmt("Failed to mprotect last page of code buffer.");
     }

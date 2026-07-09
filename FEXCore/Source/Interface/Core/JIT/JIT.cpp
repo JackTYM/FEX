@@ -911,13 +911,27 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
 
   // Fairly excessive buffer range to make sure we don't overflow
   // One page baseline, plus SSANodeMultipler bytes, plus another page for guard page.
-  const uint32_t DesiredBufferRange = AlignUp(FEXCore::Utils::FEX_PAGE_SIZE * 2 + SSACount * SSANodeMultiplier, FEXCore::Utils::FEX_PAGE_SIZE);
+  // Baselined at 2*FEX_HOST_PAGE_SIZE (not FEX_PAGE_SIZE*2): PooledAllocatorVirtualWithGuard's guard
+  // page needs the WHOLE buffer to be a multiple of the host's actual mprotect() granularity (16KB
+  // on Apple Silicon), AND at least two such pages - a buffer that's exactly one host page would have
+  // its "last page" guard computed as the buffer's own start (AlignDown(Ptr+Size-1, HostPageSize) ==
+  // Ptr when Size == HostPageSize), swallowing the entire buffer as guard and leaving zero usable
+  // bytes for even the smallest compile. The old FEX_PAGE_SIZE*2 (8KB) baseline safely cleared this
+  // on Linux (where FEX_HOST_PAGE_SIZE == FEX_PAGE_SIZE, so it's naturally 2 guest pages) but a small
+  // SSACount could round up to exactly one 16KB host page on Apple Silicon once host-aligned.
+  const uint32_t DesiredBufferRange =
+    AlignUp(FEXCore::Utils::FEX_HOST_PAGE_SIZE * 2 + SSACount * SSANodeMultiplier, FEXCore::Utils::FEX_HOST_PAGE_SIZE);
 
   // JIT output is first written to a temporary buffer and later relocated to the CodeBuffer.
   // This minimizes lock contention of CodeBufferWriteMutex.
   auto TempCodeBufferInfo = TempAllocator.ReownOrClaimBufferWithSize(DesiredBufferRange);
   auto TempCodeBuffer = TempCodeBufferInfo.Ptr;
-  const uint32_t UsableBufferRange = TempCodeBufferInfo.Size - FEXCore::Utils::FEX_PAGE_SIZE;
+  // Subtract FEX_HOST_PAGE_SIZE (not FEX_PAGE_SIZE): the guard page Alloc() above protects is a full
+  // host page (16KB on Apple Silicon, matching FEX_PAGE_SIZE on Linux where the two constants
+  // coincide), and TempCodeBufferInfo.Size is guaranteed a multiple of FEX_HOST_PAGE_SIZE (and at
+  // least 2x it) by the AlignUp above, so this lands exactly at the real guard's start, with at
+  // least one full host page of genuinely usable space remaining, on every platform.
+  const uint32_t UsableBufferRange = TempCodeBufferInfo.Size - FEXCore::Utils::FEX_HOST_PAGE_SIZE;
 
   SetBuffer(TempCodeBuffer, UsableBufferRange);
 
