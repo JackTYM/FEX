@@ -605,6 +605,18 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
   uintptr_t CallerAddress = JumpThunkStartAddress + Record->CallerOffset;
   auto BranchOffset = HostCode / 4 - CallerAddress / 4;
 
+  // The block below patches already-emitted JIT code (the caller's callsite and/or the jump
+  // thunk itself) at runtime, outside of any compile call's own JITWriteScope (CompileBlock above
+  // may not have run at all on a cache hit, and even when it did run, its JITWriteScope has
+  // already exited by the time we get here). On Apple Silicon's hardened runtime, writing to a
+  // MAP_JIT page requires this thread's JIT write-protection to be explicitly disabled first, or
+  // the write faults with EXC_BAD_ACCESS - placed after the CompileBlock call above returns so it
+  // never nests with CompileCode's own JITWriteScope (nested scopes are not reentrant-safe: the
+  // inner one's destructor would re-enable write-protection while the outer scope is still live).
+#ifdef __APPLE__
+  FEXCore::Allocator::JITWriteScope JITWrite;
+#endif
+
   uint32_t ExpectedKnownCallMarkerInst = 0;
   ARMEmitter::Emitter ExpectedKnownCallMarkerEmit(reinterpret_cast<uint8_t*>(&ExpectedKnownCallMarkerInst), 4);
   ExpectedKnownCallMarkerEmit.adr(TMP1, 0xC);
