@@ -651,9 +651,9 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
           const uint64_t CheckAddress = Block.Entry + BlockInstructionsLength;
           uint64_t Rebase = 0;
           if (!Config.Is64BitMode) {
-            Rebase = IR::WOW64_GUEST_REBASE;
+            Rebase = Config.Wow64GuestRebaseValue;
           } else if (Config.NeedsWow64GuestRebase && CheckAddress < IR::WOW64_GUEST_ADDRESS_SPACE_SIZE) {
-            Rebase = IR::WOW64_GUEST_REBASE;
+            Rebase = Config.Wow64GuestRebaseValue;
           }
           auto ExistingCodePtr = reinterpret_cast<uint8_t*>(CheckAddress + Rebase);
           auto InstAddressReg = Thread->OpDispatcher->_EntrypointOffset(GPRSize, InstAddress - GuestRIP);

@@ -2,6 +2,7 @@
 #pragma once
 
 #include "Common/JitSymbols.h"
+#include "Interface/Core/Addressing.h"
 #include "Interface/Core/CPUBackend.h"
 #include "Interface/Core/CPUID.h"
 #include <Interface/IR/IntrusiveIRList.h>
@@ -331,6 +332,10 @@ public:
     // sogen/macOS-specific: see SetNeedsWow64GuestRebase's doc comment (public Context.h).
     bool NeedsWow64GuestRebase {false};
 
+    // sogen/macOS-specific: see SetWow64GuestRebaseValue's doc comment (public Context.h).
+    // Defaults to the compile-time IR::WOW64_GUEST_REBASE for embedders that never call the setter.
+    uint64_t Wow64GuestRebaseValue {IR::WOW64_GUEST_REBASE};
+
     FEX_CONFIG_OPT(Multiblock, MULTIBLOCK);
     FEX_CONFIG_OPT(SingleStepConfig, SINGLESTEP);
     FEX_CONFIG_OPT(GdbServer, GDBSERVER);
@@ -431,6 +436,10 @@ public:
 
   void SetNeedsWow64GuestRebase(bool NeedsRebase) override {
     Config.NeedsWow64GuestRebase = NeedsRebase;
+  }
+
+  void SetWow64GuestRebaseValue(uint64_t RebaseValue) override {
+    Config.Wow64GuestRebaseValue = RebaseValue;
   }
 
   void EnableExitOnHLT() override {

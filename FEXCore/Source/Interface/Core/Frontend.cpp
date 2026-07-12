@@ -1370,9 +1370,9 @@ const Decoder::DecodeStream Decoder::AdjustAddrForSpecialRegion(const uint8_t* _
   // heaven's-gate trampoline, wow64cpu.dll) below 4GB for 32-bit-pointer reachability.
   uint64_t Rebase = 0;
   if (!CTX->Config.Is64BitMode) {
-    Rebase = IR::WOW64_GUEST_REBASE;
+    Rebase = CTX->Config.Wow64GuestRebaseValue;
   } else if (CTX->Config.NeedsWow64GuestRebase && RIP < IR::WOW64_GUEST_ADDRESS_SPACE_SIZE) {
-    Rebase = IR::WOW64_GUEST_REBASE;
+    Rebase = CTX->Config.Wow64GuestRebaseValue;
   }
   return DecodeStream {
     .InstStream = _InstStream - EntryPoint + RIP,

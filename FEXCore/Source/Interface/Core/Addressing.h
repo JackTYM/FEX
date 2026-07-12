@@ -16,6 +16,15 @@ class IREmitter;
 // itself only ever sees ordinary, unrebased 32-bit address values. 64-bit mode never uses this -
 // guest and host addresses are identical there. See OpDispatchBuilder::GuestMemoryRebase()
 // (OpcodeDispatcher.h) for the call-site helper that supplies this value (0 in 64-bit mode).
+//
+// This is only the DEFAULT (Context::Config.Wow64GuestRebaseValue's initial value, for embedders
+// that never call SetWow64GuestRebaseValue - public Context.h) - not necessarily what actually gets
+// used. A fixed compile-time value here is fragile in practice: on Apple Silicon macOS, the actual
+// host VA a real embedder can safely rebase into depends on what else this specific process has
+// already mapped (other frameworks' own dyld-load-time reservations, scaled to this machine's
+// physical RAM in ways that vary a lot from host to host), which no single constant can account
+// for. sogen calls SetWow64GuestRebaseValue with a value it probes for at runtime instead of
+// relying on this default - see fex_x86_64_emulator.cpp's reserve_wow64_host_window.
 inline constexpr uint64_t WOW64_GUEST_REBASE = 0x400000000ULL;
 
 // A 32-bit x86 guest's entire architectural address space is bounded by its 32-bit pointers -

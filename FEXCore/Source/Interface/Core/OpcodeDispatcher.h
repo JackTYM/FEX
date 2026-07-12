@@ -1264,10 +1264,10 @@ public:
   // GuestRebaseInfo::Conditional. An ordinary 64-bit-only Context needs no rebase at all.
   IR::GuestRebaseInfo GuestMemoryRebase() const {
     if (!Is64BitMode) {
-      return {.Rebase = IR::WOW64_GUEST_REBASE, .Conditional = false};
+      return {.Rebase = CTX->Config.Wow64GuestRebaseValue, .Conditional = false};
     }
     if (CTX->Config.NeedsWow64GuestRebase) {
-      return {.Rebase = IR::WOW64_GUEST_REBASE, .Conditional = true};
+      return {.Rebase = CTX->Config.Wow64GuestRebaseValue, .Conditional = true};
     }
     return {};
   }

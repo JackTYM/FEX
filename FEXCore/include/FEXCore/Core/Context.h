@@ -180,6 +180,19 @@ public:
   FEX_DEFAULT_VISIBILITY virtual void SetNeedsWow64GuestRebase(bool NeedsRebase) = 0;
 
   /**
+   * @brief sogen/macOS-specific: overrides the host address offset SetNeedsWow64GuestRebase's
+   * rebase adds (IR::WOW64_GUEST_REBASE by default - see its doc comment, Addressing.h). The
+   * embedder picks this per-process at runtime (e.g. probing for a host VA range genuinely free of
+   * other host allocations) rather than relying on the fixed compile-time default always being
+   * free. Like SetNeedsWow64GuestRebase, must be called before the first block compiles for this
+   * Context; has no effect on its own unless SetNeedsWow64GuestRebase(true) is also called (or
+   * already was).
+   *
+   * @param RebaseValue The host address offset to add to sub-4GB guest addresses.
+   */
+  FEX_DEFAULT_VISIBILITY virtual void SetWow64GuestRebaseValue(uint64_t RebaseValue) = 0;
+
+  /**
    * @brief Enable exiting the JIT when HLT is hit.
    *
    * This is to workaround a bug in Wine's longjump function which breaks our unittests.
