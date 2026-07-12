@@ -5219,7 +5219,7 @@ void OpDispatchBuilder::InvalidOp(OpcodeArgs) {
   BreakOp(Op, FEXCore::IR::BreakDefinition {
                 .ErrorRegister = 0,
                 .Signal = SIGILL,
-                .TrapNumber = 0,
+                .TrapNumber = X86State::X86_TRAPNO_UD,
                 .si_code = 0,
               });
 }
