@@ -111,9 +111,15 @@ FEX_DEFAULT_VISIBILITY extern VirtualTHPPtr VirtualTHPControl;
 #else
 using MMAP_Hook = void* (*)(void*, size_t, int, int, int, off_t);
 using MUNMAP_Hook = int (*)(void*, size_t);
+// Notified after an operation replaces the physical pages backing an existing VA range in place
+// (fresh mmap(MAP_FIXED) over live memory). Embedders that mirror FEXCore-visible memory into a
+// second mapping domain (e.g. a Hypervisor.framework guest, where hv_vm_map association survives
+// such a replacement and would keep translating to the old pages) re-establish their mapping here.
+using PAGES_REPLACED_Hook = void (*)(void*, size_t);
 
 FEX_DEFAULT_VISIBILITY extern MMAP_Hook mmap;
 FEX_DEFAULT_VISIBILITY extern MUNMAP_Hook munmap;
+FEX_DEFAULT_VISIBILITY extern PAGES_REPLACED_Hook PagesReplaced;
 FEX_DEFAULT_VISIBILITY extern void VirtualName(const char* Name, void* Ptr, size_t Size);
 
 // All commit parameters are ignored here, they are unnecessary as Linux supports overcommit
@@ -183,6 +189,9 @@ inline void VirtualDontNeed(void* Ptr, size_t Size, bool Recommit = true) {
   const uintptr_t Addr = reinterpret_cast<uintptr_t>(Ptr);
   if ((Addr & (FEXCore::Utils::FEX_HOST_PAGE_SIZE - 1)) == 0 && (Size & (FEXCore::Utils::FEX_HOST_PAGE_SIZE - 1)) == 0) {
     ::mmap(Ptr, Size, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (PagesReplaced) {
+      PagesReplaced(Ptr, Size);
+    }
   } else {
     __builtin_memset(Ptr, 0, Size);
   }
