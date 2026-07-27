@@ -553,9 +553,11 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
       Frame = TrustedThread->CurrentFrame;
     }
     if (!TrustedThread->CPUBackend.get()->IsAddressInCodeBuffer(reinterpret_cast<uintptr_t>(Record))) {
-      char Buf[160];
-      auto Len = snprintf(Buf, sizeof(Buf), "[FEX ExitFunctionLink] Record %p outside code buffer; bailing to dispatcher loop top\n",
-                          static_cast<void*>(Record));
+      char Buf[256];
+      auto* CurBuf = static_cast<Arm64JITCore*>(TrustedThread->CPUBackend.get())->CurrentCodeBuffer.get();
+      auto Len = snprintf(Buf, sizeof(Buf),
+                          "[FEX ExitFunctionLink] Record %p outside code buffer (current %p+0x%zx); bailing to dispatcher loop top\n",
+                          static_cast<void*>(Record), CurBuf ? static_cast<void*>(CurBuf->Ptr) : nullptr, CurBuf ? CurBuf->AllocatedSize : 0);
       write(STDERR_FILENO, Buf, Len);
       // No trustworthy GuestRIP can be recovered from a corrupt Record, so re-dispatch from the
       // trusted frame's current rip rather than linking or jumping to a computed-from-garbage target.
@@ -668,7 +670,7 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
   return HostCode;
 }
 
-void Arm64JITCore::Op_NoOp(const IR::IROp_Header* IROp, IR::Ref Node) {}
+void Arm64JITCore::Op_NoOp(const IR::IROp_Header* IROp, IR::Ref Node) { }
 
 Arm64JITCore::Arm64JITCore(FEXCore::Context::ContextImpl* ctx, FEXCore::Core::InternalThreadState* Thread)
   : CPUBackend(*ctx, Thread)
@@ -748,7 +750,7 @@ void Arm64JITCore::ClearCache() {
   ThreadState->LookupCache->ChangeGuestToHostMapping(*PrevCodeBuffer, *CurrentCodeBuffer->LookupCache, lk);
 }
 
-Arm64JITCore::~Arm64JITCore() {}
+Arm64JITCore::~Arm64JITCore() { }
 
 bool Arm64JITCore::IsInlineConstant(const IR::OrderedNodeWrapper& WNode, uint64_t* Value) const {
   if (WNode.IsImmediate()) {
