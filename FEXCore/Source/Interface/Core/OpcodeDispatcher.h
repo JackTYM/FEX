@@ -1597,8 +1597,8 @@ private:
   }
 
   [[nodiscard]]
-  static bool IsNonTSOReg(MemoryAccessType Access, uint8_t Reg) {
-    return Access == MemoryAccessType::DEFAULT && Reg == X86State::REG_RSP;
+  bool IsNonTSOReg(MemoryAccessType Access, uint8_t Reg) const {
+    return Access == MemoryAccessType::DEFAULT && Reg == X86State::REG_RSP && Is64BitMode;
   }
 
   AddressMode DecodeAddress(const X86Tables::DecodedOp& Op, const X86Tables::DecodedOperand& Operand, MemoryAccessType AccessType, bool IsLoad);
