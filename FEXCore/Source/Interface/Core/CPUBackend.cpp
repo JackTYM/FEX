@@ -319,6 +319,7 @@ namespace CPU {
 
     // Resize the code buffer and reallocate our code size
     CurrentCodeBuffer = CodeBuffers.StartLargerCodeBuffer();
+    ++ThreadState->CodeBufferGeneration;
 
     RegisterForSignalHandler(std::move(PrevCodeBuffer));
     return CurrentCodeBuffer.get();
@@ -339,6 +340,7 @@ namespace CPU {
     auto NewCodeBuffer = CodeBuffers.GetLatest();
     if (CurrentCodeBuffer != NewCodeBuffer) {
       RegisterForSignalHandler(CurrentCodeBuffer);
+      ++ThreadState->CodeBufferGeneration;
       return std::exchange(CurrentCodeBuffer, NewCodeBuffer);
     }
     return nullptr;
