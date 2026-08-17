@@ -113,6 +113,7 @@ struct alignas(FEXCore::Utils::FEX_HOST_PAGE_SIZE) InternalThreadState : public 
 
   // The low address of the call-ret stack allocation (not including guard pages)
   void* CallRetStackBase {};
+  uint64_t CodeBufferGeneration {};
 
   uintptr_t JITGuardPage {};
   uint64_t JITGuardOverflowArgument {};

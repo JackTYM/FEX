@@ -61,9 +61,9 @@ if (NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "Unsupported pointer size ${CMAKE_SIZEOF_VOID_P}."
     " FEX only supports 64-bit (8-byte pointer) systems."
     " If you believe this is in error, file an issue.")
-elseif (NOT (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
+elseif (NOT (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR CMAKE_SYSTEM_NAME STREQUAL "Android"))
   message(FATAL_ERROR "Unsupported system type ${CMAKE_SYSTEM_NAME}."
-    " FEX only supports Linux, Windows, and (as a sogen-local fork) Darwin."
+    " FEX only supports Linux, Android, Windows, and (as a sogen-local fork) Darwin."
     " If you believe this is in error, file an issue.")
 endif()
 
@@ -487,7 +487,7 @@ endif()
 
 if (TUNE_CPU STREQUAL "native")
   if(ARCHITECTURE_arm64)
-    if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 999999.0 OR NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 999999.0 OR (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_SYSTEM_NAME STREQUAL "Android"))
       # Clang 12.0 fixed the -mcpu=native bug with mixed big.little implementers
       # Clang can not currently check for native Apple M1 type in hypervisor. Currently disabled
       # Non-Linux hosts (e.g. Darwin) have no /proc/cpuinfo for the Cortex-model detection below

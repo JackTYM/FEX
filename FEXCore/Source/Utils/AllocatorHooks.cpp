@@ -209,7 +209,7 @@ void* memalign(size_t align, size_t s) {
 #endif
 }
 void* valloc(size_t size) {
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__ANDROID__)
   void* ptr = nullptr;
   if (::posix_memalign(&ptr, static_cast<size_t>(::getpagesize()), size) != 0) {
     return nullptr;
@@ -240,7 +240,9 @@ size_t malloc_usable_size(void* ptr) {
 #endif
 }
 void* aligned_alloc(size_t a, size_t s) {
-#ifdef __APPLE__
+#if defined(__ANDROID__)
+    return ::memalign(a, s);
+#elif defined(__APPLE__)
   // Darwin's aligned_alloc has two stricter requirements than glibc's:
   //  1. alignment must be >= sizeof(void*) (many FEXCore types have small alignof(), e.g. 1 or 4).
   //  2. size must be an exact multiple of alignment (glibc tolerates any size).
