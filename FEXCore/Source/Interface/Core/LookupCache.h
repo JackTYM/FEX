@@ -294,8 +294,15 @@ public:
     const auto& Entry = Shared->AddBlockMapping(Address, CodePages, HostCode, lk);
 
     // There is no need to update L1 or L2, they will get updated on first lookup
-    // However, adding to L1 here increases performance
-    CacheBlockMapping(Address, Entry, true, lk);
+    // However, adding to L1 here increases performance.
+    //
+    // L2 must be populated here too whenever it is enabled: FindBlock returns early on an L1 hit
+    // without ever reaching its L2 population path, so a block that only ever lives in L1 stays
+    // absent from L2 forever. The JIT dispatcher's loop top probes L2 only (there is no inlined L1
+    // lookup there), so every dispatcher re-entry for such a block leaves the JIT to ask the host
+    // for an address the host then finds in L1 - free on the in-process path, but a VM exit under
+    // Hypervisor.framework.
+    CacheBlockMapping(Address, Entry, false, lk);
   }
 
   // Invalidates L1/L2 for a given guest block
