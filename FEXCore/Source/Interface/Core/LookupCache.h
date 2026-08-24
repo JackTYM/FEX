@@ -293,9 +293,9 @@ public:
 
     const auto& Entry = Shared->AddBlockMapping(Address, CodePages, HostCode, lk);
 
-    // There is no need to update L1 or L2, they will get updated on first lookup
-    // However, adding to L1 here increases performance
-    CacheBlockMapping(Address, Entry, true, lk);
+    // L1-only would force a locked L3 fallback (FindBlock) on this block's first L1 eviction even
+    // though L2 caching is enabled; populate both so an evicted-then-rereferenced block hits L2 directly.
+    CacheBlockMapping(Address, Entry, false, lk);
   }
 
   // Invalidates L1/L2 for a given guest block
