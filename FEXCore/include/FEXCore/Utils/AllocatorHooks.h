@@ -11,6 +11,7 @@
 #include <malloc/malloc.h>
 #include <pthread.h>
 #include <TargetConditionals.h>
+#include <dlfcn.h>
 #else
 #include <malloc.h>
 #endif
@@ -160,23 +161,43 @@ inline void* VirtualAlloc(void* Base, size_t Size, bool Execute = false, bool Co
 // coarse "compile one block" / "emit one stub" boundary, not individual instruction emits, since
 // toggling has real per-call overhead.
 struct JITWriteScope {
-  // iOS has no per-thread JIT-write-protect API at all (pthread_jit_write_protect_np doesn't
-  // exist there, device or Simulator) - macOS's MAP_JIT model doesn't apply. Real device
-  // write/execute control instead needs the JIT26 breakpoint-protocol split-mapping technique,
-  // wired into this allocator separately; the Simulator needs no protection at all. No-op here
-  // is correct on both.
+  // Real iOS device has no per-thread JIT-write-protect API at all (pthread_jit_write_protect_np
+  // doesn't exist there) - real device write/execute control instead needs the JIT26
+  // breakpoint-protocol split-mapping technique, wired into this allocator separately. The
+  // Simulator is a plain macOS process (same kernel, same libpthread), so Apple Silicon's
+  // per-thread MAP_JIT W^X model applies there exactly as it does on desktop macOS, and skipping
+  // the toggle faults the very first JIT write with EXC_BAD_ACCESS/SIGBUS (confirmed empirically).
+  // The iOS SDK headers mark the symbol `unavailable` for both iOS targets regardless (it links
+  // fine on the Simulator, which really is the host macOS kernel), so it's resolved via dlsym
+  // instead of calling it directly - that sidesteps the compile-time availability annotation, and
+  // naturally no-ops on real device too (dlsym returns null there, matching the intended no-op).
   JITWriteScope() {
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
     ::pthread_jit_write_protect_np(0);
+#elif defined(__APPLE__)
+    JITWriteScope::CallJitWriteProtect(0);
 #endif
   }
   ~JITWriteScope() {
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
     ::pthread_jit_write_protect_np(1);
+#elif defined(__APPLE__)
+    JITWriteScope::CallJitWriteProtect(1);
 #endif
   }
   JITWriteScope(const JITWriteScope&) = delete;
   JITWriteScope& operator=(const JITWriteScope&) = delete;
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+private:
+  static void CallJitWriteProtect(int Enabled) {
+    using JitWriteProtectNpFn = void (*)(int);
+    static auto* const Fn = reinterpret_cast<JitWriteProtectNpFn>(::dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np"));
+    if (Fn != nullptr) {
+      Fn(Enabled);
+    }
+  }
+#endif
 };
 #endif
 
