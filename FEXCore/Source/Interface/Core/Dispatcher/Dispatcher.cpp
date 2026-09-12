@@ -42,6 +42,51 @@ Dispatcher::Dispatcher(FEXCore::Context::ContextImpl* ctx)
   , CTX {ctx} {
   EmitDispatcher();
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+  // On real iOS device, VirtualAlloc(..., Execute=true) above (and therefore this Buffer's base,
+  // used by every GetCursorAddress() call in EmitDispatcher()) is a JIT26 writable alias rather
+  // than the real executable address (see AllocatorHooks.h). Every address EmitDispatcher() just
+  // computed is used from here on purely as a call/branch target or a signal-handler resume
+  // address (ExecuteDispatch, ExecuteJITCallback, MakeSignalDelegatorConfig, ...), never written
+  // to again, so convert them all, once, in bulk.
+  const auto ToRX = [](uint64_t Addr) -> uint64_t {
+    return reinterpret_cast<uint64_t>(FEXCore::Allocator::JIT26ToExecutable(reinterpret_cast<void*>(Addr)));
+  };
+  DispatchPtr = reinterpret_cast<AsmDispatch>(FEXCore::Allocator::JIT26ToExecutable(reinterpret_cast<void*>(DispatchPtr)));
+  CallbackPtr = reinterpret_cast<JITCallback>(FEXCore::Allocator::JIT26ToExecutable(reinterpret_cast<void*>(CallbackPtr)));
+  ThreadStopHandlerAddress = ToRX(ThreadStopHandlerAddress);
+  ThreadStopHandlerAddressSpillSRA = ToRX(ThreadStopHandlerAddressSpillSRA);
+  AbsoluteLoopTopAddress = ToRX(AbsoluteLoopTopAddress);
+  AbsoluteLoopTopAddressFillSRA = ToRX(AbsoluteLoopTopAddressFillSRA);
+  AbsoluteLoopTopAddressEnterEC = ToRX(AbsoluteLoopTopAddressEnterEC);
+  AbsoluteLoopTopAddressEnterECFillSRA = ToRX(AbsoluteLoopTopAddressEnterECFillSRA);
+  ThreadPauseHandlerAddress = ToRX(ThreadPauseHandlerAddress);
+  ThreadPauseHandlerAddressSpillSRA = ToRX(ThreadPauseHandlerAddressSpillSRA);
+  ExitFunctionLinkerAddress = ToRX(ExitFunctionLinkerAddress);
+  SignalHandlerReturnAddress = ToRX(SignalHandlerReturnAddress);
+  SignalHandlerReturnAddressRT = ToRX(SignalHandlerReturnAddressRT);
+  GuestSignal_SIGILL = ToRX(GuestSignal_SIGILL);
+  GuestSignal_SIGTRAP = ToRX(GuestSignal_SIGTRAP);
+  GuestSignal_SIGSEGV = ToRX(GuestSignal_SIGSEGV);
+  PauseReturnInstruction = ToRX(PauseReturnInstruction);
+  for (auto& ABIPointer : ABIPointers) {
+    ABIPointer = ToRX(ABIPointer);
+  }
+  Start = ToRX(Start);
+  End = ToRX(End);
+  LUDIVHandlerAddress = ToRX(LUDIVHandlerAddress);
+  LDIVHandlerAddress = ToRX(LDIVHandlerAddress);
+  F64SinHandlerAddress = ToRX(F64SinHandlerAddress);
+  F64CosHandlerAddress = ToRX(F64CosHandlerAddress);
+  F64TanHandlerAddress = ToRX(F64TanHandlerAddress);
+  F64F2XM1HandlerAddress = ToRX(F64F2XM1HandlerAddress);
+  F64ScaleHandlerAddress = ToRX(F64ScaleHandlerAddress);
+  F64AtanHandlerAddress = ToRX(F64AtanHandlerAddress);
+  F64FYL2XHandlerAddress = ToRX(F64FYL2XHandlerAddress);
+  F64FPREMHandlerAddress = ToRX(F64FPREMHandlerAddress);
+  F64FPREM1HandlerAddress = ToRX(F64FPREM1HandlerAddress);
+#endif
+
   FEXCore::Allocator::VirtualName("FEXMem_Misc", reinterpret_cast<void*>(GetBufferBase()), MAX_DISPATCHER_CODE_SIZE);
 }
 
@@ -612,7 +657,11 @@ void Dispatcher::EmitDispatcher() {
 
   Start = reinterpret_cast<uint64_t>(DispatchPtr);
   End = GetCursorAddress<uint64_t>();
-  ClearICache(reinterpret_cast<void*>(DispatchPtr), End - reinterpret_cast<uint64_t>(DispatchPtr));
+  // DispatchPtr is still relative to GetBufferBase(), which on real iOS device is a JIT26 writable
+  // alias rather than the real executable address (see AllocatorHooks.h) - icache invalidation has
+  // to target the address that will actually be executed. The length is unaffected: it's a plain
+  // size, identical in either address space.
+  ClearICache(FEXCore::Allocator::JIT26ToExecutable(reinterpret_cast<void*>(DispatchPtr)), End - reinterpret_cast<uint64_t>(DispatchPtr));
 
   if (CTX->Config.BlockJITNaming()) {
     fextl::string Name = fextl::fmt::format("Dispatch_{}", FHU::Syscalls::gettid());

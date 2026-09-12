@@ -353,6 +353,14 @@ namespace CPU {
     Ptr = static_cast<uint8_t*>(FEXCore::Allocator::VirtualAlloc(Size, true));
     LOGMAN_THROW_A_FMT(!!Ptr, "Couldn't allocate code buffer");
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+    // On real iOS device, Ptr is a JIT26 writable alias of a separately-blessed executable region
+    // (see AllocatorHooks.h), not an ordinary mapping - the Unicorn backend's own JIT26 bring-up
+    // (src/common/utils/ios_device_jit_mmap_shim.cpp) found that an mprotect() call landing inside
+    // such a region hangs indefinitely rather than failing cleanly, and works around it by turning
+    // those calls into no-ops. Skip the guard-page protect here for the same reason: it's a safety
+    // net against JIT buffer overflow, not something guest correctness depends on.
+#else
     // Protect the last page of the allocated buffer to trigger SIGSEGV on write access.
     // Uses FEX_HOST_PAGE_SIZE (not FEX_PAGE_SIZE): the whole Size-byte region is one contiguous
     // allocation, so its last real host page belongs to it entirely regardless of host page size,
@@ -364,6 +372,7 @@ namespace CPU {
                                             FEXCore::Allocator::ProtectOptions::None)) {
       LogMan::Msg::EFmt("Failed to mprotect last page of code buffer.");
     }
+#endif
 
     FEXCore::Allocator::VirtualName("FEXMemJIT", reinterpret_cast<void*>(Ptr), Size);
 
@@ -440,10 +449,16 @@ namespace CPU {
 
   bool CPUBackend::IsAddressInCodeBuffer(uintptr_t Address) const {
     auto CheckCodeBuffer = [](CodeBuffer& Buffer, uintptr_t Address) {
+      // Address is only ever the runtime PC of actually-executing code (see ExitFunctionLink),
+      // which on real iOS device is the JIT26 execute-only mapping - Buffer.Ptr, in contrast, is
+      // whatever VirtualAlloc(..., Execute=true) returned, the writable alias on that
+      // configuration (see AllocatorHooks.h). Convert to the executable base for the comparison;
+      // identity everywhere else, so this is a no-op on every other configuration.
+      uintptr_t const BufferBase = reinterpret_cast<uintptr_t>(FEXCore::Allocator::JIT26ToExecutable(Buffer.Ptr));
       // The last page of the code buffer is protected, so we need to exclude it from the valid range
       // when checking if the address is in the code buffer.
-      uintptr_t LastPageAddr = AlignDown(reinterpret_cast<uintptr_t>(Buffer.Ptr) + Buffer.AllocatedSize - 1, FEXCore::Utils::FEX_PAGE_SIZE);
-      return (Address >= reinterpret_cast<uintptr_t>(Buffer.Ptr) && Address < LastPageAddr);
+      uintptr_t LastPageAddr = AlignDown(BufferBase + Buffer.AllocatedSize - 1, FEXCore::Utils::FEX_PAGE_SIZE);
+      return (Address >= BufferBase && Address < LastPageAddr);
     };
 
     if (CheckCodeBuffer(*CurrentCodeBuffer, Address)) {

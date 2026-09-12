@@ -12,6 +12,7 @@
 #include <pthread.h>
 #include <TargetConditionals.h>
 #include <dlfcn.h>
+#include <FEXCore/Utils/JIT26.h>
 #else
 #include <malloc.h>
 #endif
@@ -134,10 +135,122 @@ FEX_DEFAULT_VISIBILITY extern void VirtualName(const char* Name, void* Ptr, size
 inline int MapJitFlagIfExecutable(bool Execute) {
   return Execute ? MAP_JIT : 0;
 }
+
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+// Real iOS device rejects a plain mmap(MAP_JIT) executable mapping outright (EXC_BAD_ACCESS /
+// KERN_PROTECTION_FAILURE, confirmed even under externally-granted CS_DEBUGGED - see the Unicorn
+// backend's own JIT26 bring-up, src/common/utils/ios_device_jit_mmap_shim.cpp, for the full story).
+// It needs QEMU's upstream "splitwx" (split write/execute) architecture instead:
+// fexcore_jit26_prepare_region() hands back a genuinely executable (RX) region, and
+// fexcore_jit26_writable_alias() maps a separate writable (RW) alias of the same physical pages.
+// VirtualAlloc(..., Execute=true) below hands back the RW alias (what every existing caller
+// already expects to write generated code through); anything that instead needs the real
+// executable address, or needs to write through an address it only has in RX form (e.g. one
+// derived from an actually-executing PC), must go through JIT26ToExecutable()/JIT26ToWritable()
+// near the bottom of this file.
+namespace JIT26Detail {
+  struct Region {
+    uintptr_t RWBase = 0;
+    uintptr_t RXBase = 0;
+    size_t Size = 0;
+  };
+
+  // A handful of long-lived regions (the dispatcher, plus one CodeBuffer generation per guest
+  // thread and any it outlives briefly for signal-handler safety) - a small fixed table with a
+  // plain lock is simple and more than sufficient; registration/lookup are nowhere near hot
+  // enough (once per allocation, once per compiled block or link event) to need anything fancier.
+  inline constexpr size_t MaxRegions = 64;
+  inline Region g_Regions[MaxRegions] {};
+  inline size_t g_RegionCount = 0;
+  inline pthread_mutex_t g_RegionsMutex = PTHREAD_MUTEX_INITIALIZER;
+
+  inline void RegisterRegion(void* RX, void* RW, size_t Size) {
+    pthread_mutex_lock(&g_RegionsMutex);
+    if (g_RegionCount < MaxRegions) {
+      g_Regions[g_RegionCount++] = Region {
+        .RWBase = reinterpret_cast<uintptr_t>(RW),
+        .RXBase = reinterpret_cast<uintptr_t>(RX),
+        .Size = Size,
+      };
+    }
+    pthread_mutex_unlock(&g_RegionsMutex);
+  }
+
+  // The blessed (RX) region itself has no "unprepare" API, so it's intentionally leaked here
+  // (matching the Unicorn backend's own JIT26 usage, which never frees its region either) - only
+  // the writable alias, an ordinary mach_vm_remap() mapping, is dropped from the table so it stops
+  // being handed out by ToWritable() once the caller unmaps it.
+  inline void UnregisterRegionByWritableBase(void* RW) {
+    const auto Addr = reinterpret_cast<uintptr_t>(RW);
+    pthread_mutex_lock(&g_RegionsMutex);
+    for (size_t i = 0; i < g_RegionCount; ++i) {
+      if (g_Regions[i].RWBase == Addr) {
+        g_Regions[i] = g_Regions[g_RegionCount - 1];
+        --g_RegionCount;
+        break;
+      }
+    }
+    pthread_mutex_unlock(&g_RegionsMutex);
+  }
+
+  inline void* ToExecutable(void* Ptr) {
+    const auto Addr = reinterpret_cast<uintptr_t>(Ptr);
+    pthread_mutex_lock(&g_RegionsMutex);
+    for (size_t i = 0; i < g_RegionCount; ++i) {
+      const auto& R = g_Regions[i];
+      if (Addr >= R.RWBase && Addr < R.RWBase + R.Size) {
+        pthread_mutex_unlock(&g_RegionsMutex);
+        return reinterpret_cast<void*>(R.RXBase + (Addr - R.RWBase));
+      }
+    }
+    pthread_mutex_unlock(&g_RegionsMutex);
+    // Already executable (or not a JIT26 region at all) - identity.
+    return Ptr;
+  }
+
+  inline void* ToWritable(void* Ptr) {
+    const auto Addr = reinterpret_cast<uintptr_t>(Ptr);
+    pthread_mutex_lock(&g_RegionsMutex);
+    for (size_t i = 0; i < g_RegionCount; ++i) {
+      const auto& R = g_Regions[i];
+      if (Addr >= R.RXBase && Addr < R.RXBase + R.Size) {
+        pthread_mutex_unlock(&g_RegionsMutex);
+        return reinterpret_cast<void*>(R.RWBase + (Addr - R.RXBase));
+      }
+    }
+    pthread_mutex_unlock(&g_RegionsMutex);
+    // Already writable (or not a JIT26 region at all) - identity.
+    return Ptr;
+  }
+
+  inline void* AllocateExecutable(void* Hint, size_t Size) {
+    void* const RX = fexcore_jit26_prepare_region(Hint, Size);
+    if (RX == nullptr) {
+      return nullptr;
+    }
+    int KernReturn = 0;
+    unsigned int CurProt = 0, MaxProt = 0;
+    void* const RW = fexcore_jit26_writable_alias(RX, Size, &KernReturn, &CurProt, &MaxProt);
+    if (RW == nullptr) {
+      // No writable alias - handing back the RX region directly means the first attempt to write
+      // generated code through it will fault, but that's no worse than returning nullptr here and
+      // having every caller's null-check fire instead.
+      return RX;
+    }
+    RegisterRegion(RX, RW, Size);
+    return RW;
+  }
+} // namespace JIT26Detail
+#endif
 #endif
 
 inline void* VirtualAlloc(size_t Size, bool Execute = false, bool Commit = true) {
 #ifdef __APPLE__
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+  if (Execute) {
+    return JIT26Detail::AllocateExecutable(nullptr, Size);
+  }
+#endif
   return FEXCore::Allocator::mmap(nullptr, Size, PROT_READ | PROT_WRITE | (Execute ? PROT_EXEC : 0),
                                   MAP_PRIVATE | MAP_ANONYMOUS | MapJitFlagIfExecutable(Execute), -1, 0);
 #else
@@ -147,6 +260,11 @@ inline void* VirtualAlloc(size_t Size, bool Execute = false, bool Commit = true)
 
 inline void* VirtualAlloc(void* Base, size_t Size, bool Execute = false, bool Commit = true) {
 #ifdef __APPLE__
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+  if (Execute) {
+    return JIT26Detail::AllocateExecutable(Base, Size);
+  }
+#endif
   return FEXCore::Allocator::mmap(Base, Size, PROT_READ | PROT_WRITE | (Execute ? PROT_EXEC : 0),
                                   MAP_PRIVATE | MAP_ANONYMOUS | MapJitFlagIfExecutable(Execute), -1, 0);
 #else
@@ -202,6 +320,13 @@ private:
 #endif
 
 inline void VirtualFree(void* Ptr, size_t Size) {
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+  // Ptr is a JIT26 writable alias if (and only if) it came from VirtualAlloc(..., Execute=true) -
+  // an ordinary mach_vm_remap() mapping, safe to munmap here as usual. The RX region it aliases has
+  // no "unprepare" counterpart to JIT26's blessing, so it's deliberately left mapped (see
+  // JIT26Detail::UnregisterRegionByWritableBase).
+  JIT26Detail::UnregisterRegionByWritableBase(Ptr);
+#endif
   FEXCore::Allocator::munmap(Ptr, Size);
 }
 inline void VirtualDontNeed(void* Ptr, size_t Size, bool Recommit = true) {
@@ -257,6 +382,29 @@ inline void VirtualTHPControl(const void* Ptr, size_t Size, THPControl Control) 
 }
 
 #endif
+
+// Splitwx (execute-only / write-only split mapping) address conversion. Identity on every
+// configuration except real iOS device, where VirtualAlloc(..., Execute=true) hands back a JIT26
+// writable alias rather than the real executable address (see JIT26Detail::AllocateExecutable
+// above): anything that needs to actually branch to, call, or icache-invalidate a JIT-generated
+// address must convert it with JIT26ToExecutable() first; anything that needs to write through an
+// address it only has in executable form (e.g. one derived from an actually-executing PC, which
+// can only ever be the real RX address) must convert the other way with JIT26ToWritable() first.
+inline void* JIT26ToExecutable(void* Ptr) {
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+  return JIT26Detail::ToExecutable(Ptr);
+#else
+  return Ptr;
+#endif
+}
+
+inline void* JIT26ToWritable(void* Ptr) {
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+  return JIT26Detail::ToWritable(Ptr);
+#else
+  return Ptr;
+#endif
+}
 
 // Memory allocation routines to be defined externally.
 // This allows to use jemalloc for emulation while using the normal allocator

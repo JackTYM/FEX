@@ -514,7 +514,14 @@ static void DirectBlockDelinker(FEXCore::Context::ExitFunctionLinkData* Record, 
     BranchEmit.b(BranchOffset);
   }
 
-  std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(CallerAddress)).store(BranchInst, std::memory_order::relaxed);
+  // CallerAddress is only ever reached via Record, which in turn is only ever reached via the
+  // CPU's real PC (this delinker is invoked with the same Record that was linked from
+  // ExitFunctionLink) - on real iOS device that makes it the JIT26 execute-only mapping, so the
+  // patch write has to go through the writable alias. ClearICache still targets CallerAddress
+  // itself: invalidation must happen at the address that will actually be executed.
+  auto* const WritableCallerAddress =
+    reinterpret_cast<uint32_t*>(FEXCore::Allocator::JIT26ToWritable(reinterpret_cast<void*>(CallerAddress)));
+  std::atomic_ref<uint32_t>(*WritableCallerAddress).store(BranchInst, std::memory_order::relaxed);
   ARMEmitter::Emitter::ClearICache(reinterpret_cast<void*>(CallerAddress), 4);
 }
 
@@ -525,7 +532,9 @@ static void IndirectBlockDelinker(FEXCore::Context::ExitFunctionLinkData* Record
   // Restore branch +2 instructions to jump to the linker block
   BranchEmit.b(0x2);
 
-  std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(JumpThunkStartAddress)).store(BranchInst, std::memory_order::relaxed);
+  auto* const WritableJumpThunkStartAddress =
+    reinterpret_cast<uint32_t*>(FEXCore::Allocator::JIT26ToWritable(reinterpret_cast<void*>(JumpThunkStartAddress)));
+  std::atomic_ref<uint32_t>(*WritableJumpThunkStartAddress).store(BranchInst, std::memory_order::relaxed);
   ARMEmitter::Emitter::ClearICache(reinterpret_cast<void*>(JumpThunkStartAddress), 4);
 
   // No need to reset HostCode here as the exit linker pointer is stored separately, and if the block is relinked it will be updated.
@@ -648,20 +657,32 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
         GuestRip, Record, [](FEXCore::Context::ExitFunctionLinkData* Record) { DirectBlockDelinker(Record, false); }, lk);
     }
 
-    std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(CallerAddress)).store(BranchInst, std::memory_order::relaxed);
+    // CallerAddress is always the address that will actually execute (it's derived from Record,
+    // which is only ever reached via the CPU's real PC) - on real iOS device that's the JIT26
+    // execute-only mapping, so the write has to go through the writable alias, while ClearICache
+    // still invalidates at CallerAddress itself (the address that will actually be executed).
+    auto* const WritableCallerAddress =
+      reinterpret_cast<uint32_t*>(FEXCore::Allocator::JIT26ToWritable(reinterpret_cast<void*>(CallerAddress)));
+    std::atomic_ref<uint32_t>(*WritableCallerAddress).store(BranchInst, std::memory_order::relaxed);
     ARMEmitter::Emitter::ClearICache(reinterpret_cast<void*>(CallerAddress), 4);
   } else {
     // This case is common between calls and jumps as the thunk callsite can be left untouched.
-    std::atomic_ref<uint64_t>(Record->HostCode).store(HostCode, std::memory_order::seq_cst);
+    // Record itself is only ever reached via the CPU's real PC, so the same RX/RW split applies to
+    // writing through it as it does to CallerAddress above.
+    auto* const WritableRecord =
+      reinterpret_cast<FEXCore::Context::ExitFunctionLinkData*>(FEXCore::Allocator::JIT26ToWritable(reinterpret_cast<void*>(Record)));
+    std::atomic_ref<uint64_t>(WritableRecord->HostCode).store(HostCode, std::memory_order::seq_cst);
 #ifdef ARCHITECTURE_arm64
     // Make memory write visible to other threads reading the same location
-    asm volatile("dc cvau, %0; dsb ish" : : "r"(Record->HostCode) :);
+    asm volatile("dc cvau, %0; dsb ish" : : "r"(HostCode) :);
 #endif
 
     uint32_t LdrInst = 0;
     ARMEmitter::Emitter LdrEmit(reinterpret_cast<uint8_t*>(&LdrInst), 4);
     LdrEmit.ldr(TMP1, reinterpret_cast<uint64_t>(&Record->HostCode) - JumpThunkStartAddress);
-    std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(JumpThunkStartAddress)).store(LdrInst, std::memory_order::relaxed);
+    auto* const WritableJumpThunkStartAddress =
+      reinterpret_cast<uint32_t*>(FEXCore::Allocator::JIT26ToWritable(reinterpret_cast<void*>(JumpThunkStartAddress)));
+    std::atomic_ref<uint32_t>(*WritableJumpThunkStartAddress).store(LdrInst, std::memory_order::relaxed);
     ARMEmitter::Emitter::ClearICache(reinterpret_cast<void*>(JumpThunkStartAddress), 4);
 
     Thread->LookupCache->AddBlockLink(GuestRip, Record, IndirectBlockDelinker, lk);
@@ -1206,7 +1227,20 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
 
   TempAllocator.DelayedDisownBuffer();
 
-  ClearICache(CodeBegin, CodeOnlySize);
+  // Everything above is relative to CurrentCodeBuffer->Ptr, which on real iOS device is a JIT26
+  // writable alias rather than the real executable address (see AllocatorHooks.h) - icache
+  // invalidation has to target the address that will actually be executed.
+  ClearICache(FEXCore::Allocator::JIT26ToExecutable(CodeBegin), CodeOnlySize);
+
+  // CodeData.BlockBegin/EntryPoints are handed back to the caller (Context::ContextImpl::CompileBlock)
+  // for storage in the LookupCache and use as call/branch targets from then on - see
+  // CPUBackend::CompileCode's own doc comment ("The returned pointer needs to be long lived and be
+  // executable in the host environment"). Convert once here, at the single point these addresses
+  // leave the JIT backend, rather than at every downstream consumer.
+  CodeData.BlockBegin = reinterpret_cast<uint8_t*>(FEXCore::Allocator::JIT26ToExecutable(CodeData.BlockBegin));
+  for (auto& EntryPoint : CodeData.EntryPoints) {
+    EntryPoint.second = reinterpret_cast<uint8_t*>(FEXCore::Allocator::JIT26ToExecutable(EntryPoint.second));
+  }
 
 #ifdef VIXL_DISASSEMBLER
   if (Disassemble() & FEXCore::Config::Disassemble::STATS) {
