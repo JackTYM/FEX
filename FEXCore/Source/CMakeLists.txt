@@ -330,5 +330,11 @@ if (NOT MINGW)
   target_include_directories(JemallocDummy PRIVATE "${PROJECT_SOURCE_DIR}/include/")
 endif()
 
-# The shared library should always link enabled jemalloc libraries
+# The shared library should always link enabled jemalloc libraries. The static library needs the
+# same thing: FEXCore::Allocator::malloc/calloc/memalign/etc. (AllocatorHooks.cpp, the same TU
+# JemallocLibs already builds) are declared in AllocatorHooks.h "to be defined externally" but were
+# never linked into the plain static ${PROJECT_NAME} target, only the shared one - real code (e.g.
+# FEXAllocOperators::operator new) calls them unconditionally, so any consumer that links FEXCore
+# statically (not FEXCore_shared) was left with unresolved symbols at its own final link time.
+target_link_libraries(${PROJECT_NAME} PRIVATE JemallocLibs)
 target_link_libraries(${PROJECT_NAME}_shared PRIVATE JemallocLibs)
