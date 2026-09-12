@@ -5,6 +5,10 @@
 #include <cstring>
 #include <type_traits>
 
+#ifdef __APPLE__
+#include <libkern/OSCacheControl.h>
+#endif
+
 namespace ARMEmitter {
 class Buffer {
 public:
@@ -63,7 +67,14 @@ public:
   }
 
   static void ClearICache(void* Begin, std::size_t Length) {
+#ifdef __APPLE__
+    // libclang_rt.ios.a (real device, unlike libclang_rt.iossim.a) doesn't ship a __clear_cache
+    // fallback at all, so __builtin___clear_cache is left unresolved at link time. Darwin's own
+    // documented API works on both device and simulator.
+    sys_icache_invalidate(Begin, Length);
+#else
     __builtin___clear_cache(static_cast<char*>(Begin), static_cast<char*>(Begin) + Length);
+#endif
   }
 
   size_t GetCursorOffset() const {

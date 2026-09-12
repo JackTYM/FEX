@@ -13,6 +13,10 @@
 #include <atomic>
 #include <cstdint>
 
+#ifdef __APPLE__
+#include <libkern/OSCacheControl.h>
+#endif
+
 namespace FEXCore::ArchHelpers::Arm64 {
 constexpr uint32_t CASPAL_MASK = 0xBF'E0'FC'00;
 constexpr uint32_t CASPAL_INST = 0x08'60'FC'00;
@@ -120,7 +124,14 @@ static constexpr uint32_t GetRmReg(uint32_t Instr) {
 }
 
 static void ClearICache(void* Begin, std::size_t Length) {
+#ifdef __APPLE__
+  // libclang_rt.ios.a (real device, unlike libclang_rt.iossim.a) doesn't ship a __clear_cache
+  // fallback at all, so __builtin___clear_cache is left unresolved at link time. Darwin's own
+  // documented API works on both device and simulator.
+  sys_icache_invalidate(Begin, Length);
+#else
   __builtin___clear_cache(static_cast<char*>(Begin), static_cast<char*>(Begin) + Length);
+#endif
 }
 
 static __uint128_t LoadAcquire128(uint64_t Addr) {
