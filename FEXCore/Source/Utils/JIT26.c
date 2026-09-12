@@ -49,7 +49,7 @@ extern kern_return_t mach_vm_remap(
 
 typedef int (*csops_fn)(pid_t, unsigned int, void *, size_t);
 
-bool jit26_is_debugged(void)
+bool fexcore_jit26_is_debugged(void)
 {
 	static csops_fn csops_ptr = NULL;
 	if (!csops_ptr)
@@ -69,8 +69,8 @@ bool jit26_is_debugged(void)
 	return (flags & CS_DEBUGGED) != 0;
 }
 
-void *jit26_writable_alias(void *rx_address, size_t length, int *out_kern_return, unsigned int *out_cur_prot,
-                            unsigned int *out_max_prot)
+void *fexcore_jit26_writable_alias(void *rx_address, size_t length, int *out_kern_return, unsigned int *out_cur_prot,
+                                    unsigned int *out_max_prot)
 {
 	mach_vm_address_t target_address = 0;
 	vm_prot_t cur_prot = 0;
@@ -116,7 +116,7 @@ void *jit26_writable_alias(void *rx_address, size_t length, int *out_kern_return
 	return (void *)target_address;
 }
 
-__attribute__((noinline, optnone, naked)) void jit26_detach(void)
+__attribute__((noinline, optnone, naked)) void fexcore_jit26_detach(void)
 {
 	__asm__(
 	    "mov x16, #0\n"
@@ -124,7 +124,7 @@ __attribute__((noinline, optnone, naked)) void jit26_detach(void)
 	    "ret\n");
 }
 
-__attribute__((noinline, optnone, naked)) void *jit26_prepare_region(void *address, size_t length)
+__attribute__((noinline, optnone, naked)) void *fexcore_jit26_prepare_region(void *address, size_t length)
 {
 	__asm__(
 	    "mov x16, #1\n"
