@@ -9,6 +9,7 @@
 #include <FEXCore/Utils/AllocatorHooks.h>
 #include <FEXCore/Utils/PrctlUtils.h>
 
+#include <atomic>
 #include <cstdint>
 
 #if !defined(_WIN32) && !defined(__APPLE__)
@@ -359,7 +360,15 @@ namespace CPU {
     // (src/common/utils/ios_device_jit_mmap_shim.cpp) found that an mprotect() call landing inside
     // such a region hangs indefinitely rather than failing cleanly, and works around it by turning
     // those calls into no-ops. Skip the guard-page protect here for the same reason: it's a safety
-    // net against JIT buffer overflow, not something guest correctness depends on.
+    // net against JIT buffer overflow, not something guest correctness depends on. Logged once
+    // (not per-CodeBuffer, since this runs on every allocation/resize) so a future device-debugging
+    // session knows the guard page was intentionally never installed rather than silently missing.
+    static std::atomic<bool> LoggedGuardPageSkipOnce {false};
+    if (!LoggedGuardPageSkipOnce.exchange(true, std::memory_order_relaxed)) {
+      LogMan::Msg::EFmt("Skipping code buffer guard-page mprotect on real iOS device - mprotect() on an "
+                        "already-JIT26-blessed region is known to hang, so the overflow guard page is "
+                        "intentionally never installed here.");
+    }
 #else
     // Protect the last page of the allocated buffer to trigger SIGSEGV on write access.
     // Uses FEX_HOST_PAGE_SIZE (not FEX_PAGE_SIZE): the whole Size-byte region is one contiguous

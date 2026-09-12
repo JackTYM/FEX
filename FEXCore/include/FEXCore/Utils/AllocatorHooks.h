@@ -23,6 +23,8 @@
 #endif
 
 #include <new>
+#include <atomic>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <sys/types.h>
@@ -149,76 +151,69 @@ inline int MapJitFlagIfExecutable(bool Execute) {
 // derived from an actually-executing PC), must go through JIT26ToExecutable()/JIT26ToWritable()
 // near the bottom of this file.
 namespace JIT26Detail {
+  // ToExecutable()/ToWritable() are called from CPUBackend::IsAddressInCodeBuffer, which real
+  // signal handlers call (SignalDelegator.cpp, checking a faulting PC) - a signal can land on a
+  // thread that is already inside a lock this table's own reader/writer path might take (e.g. mid-
+  // VirtualAlloc while lazily compiling a new code buffer), and mutexes are not async-signal-safe
+  // regardless of recursiveness, so a lock here can self-deadlock the interrupted thread. Regions
+  // are only ever appended, never removed (VirtualFree only unmaps the writable alias - the table
+  // entry, and the RX region it describes, is intentionally left in place, matching the Unicorn
+  // backend's own JIT26 usage, which never frees its region either), so a lock-free, append-only
+  // scheme works: each slot's Size field is the publish flag, written last with release ordering
+  // once RWBase/RXBase are already in place, and read first with acquire ordering by every reader -
+  // that ordering is what makes RWBase/RXBase visible together with a non-zero Size, so a reader
+  // (including one running inside a signal handler) never blocks and never sees a torn entry.
   struct Region {
     uintptr_t RWBase = 0;
     uintptr_t RXBase = 0;
-    size_t Size = 0;
+    std::atomic<size_t> Size {0};
   };
 
   // A handful of long-lived regions (the dispatcher, plus one CodeBuffer generation per guest
-  // thread and any it outlives briefly for signal-handler safety) - a small fixed table with a
-  // plain lock is simple and more than sufficient; registration/lookup are nowhere near hot
-  // enough (once per allocation, once per compiled block or link event) to need anything fancier.
+  // thread and any it outlives briefly for signal-handler safety) - registration is nowhere near
+  // hot enough (once per allocation) to need more than a generous fixed capacity.
   inline constexpr size_t MaxRegions = 64;
   inline Region g_Regions[MaxRegions] {};
-  inline size_t g_RegionCount = 0;
-  inline pthread_mutex_t g_RegionsMutex = PTHREAD_MUTEX_INITIALIZER;
+  inline std::atomic<size_t> g_NextRegionIndex {0};
 
   inline void RegisterRegion(void* RX, void* RW, size_t Size) {
-    pthread_mutex_lock(&g_RegionsMutex);
-    if (g_RegionCount < MaxRegions) {
-      g_Regions[g_RegionCount++] = Region {
-        .RWBase = reinterpret_cast<uintptr_t>(RW),
-        .RXBase = reinterpret_cast<uintptr_t>(RX),
-        .Size = Size,
-      };
+    const size_t Index = g_NextRegionIndex.fetch_add(1, std::memory_order_relaxed);
+    if (Index >= MaxRegions) {
+      // A fresh JIT26 region would silently fall through ToExecutable()/ToWritable() as "not a
+      // JIT26 region at all" (plain identity) from here on, reintroducing exactly the RX/RW bug
+      // this table exists to fix - fail loudly rather than let that miscompile silently.
+      LogMan::Msg::EFmt("JIT26: region table exhausted ({} regions already registered) - a fresh "
+                        "writable alias will not convert to its executable address",
+                        MaxRegions);
+      assert(false && "JIT26Detail::g_Regions exhausted - raise MaxRegions");
+      return;
     }
-    pthread_mutex_unlock(&g_RegionsMutex);
-  }
-
-  // The blessed (RX) region itself has no "unprepare" API, so it's intentionally leaked here
-  // (matching the Unicorn backend's own JIT26 usage, which never frees its region either) - only
-  // the writable alias, an ordinary mach_vm_remap() mapping, is dropped from the table so it stops
-  // being handed out by ToWritable() once the caller unmaps it.
-  inline void UnregisterRegionByWritableBase(void* RW) {
-    const auto Addr = reinterpret_cast<uintptr_t>(RW);
-    pthread_mutex_lock(&g_RegionsMutex);
-    for (size_t i = 0; i < g_RegionCount; ++i) {
-      if (g_Regions[i].RWBase == Addr) {
-        g_Regions[i] = g_Regions[g_RegionCount - 1];
-        --g_RegionCount;
-        break;
-      }
-    }
-    pthread_mutex_unlock(&g_RegionsMutex);
+    Region& R = g_Regions[Index];
+    R.RWBase = reinterpret_cast<uintptr_t>(RW);
+    R.RXBase = reinterpret_cast<uintptr_t>(RX);
+    R.Size.store(Size, std::memory_order_release);
   }
 
   inline void* ToExecutable(void* Ptr) {
     const auto Addr = reinterpret_cast<uintptr_t>(Ptr);
-    pthread_mutex_lock(&g_RegionsMutex);
-    for (size_t i = 0; i < g_RegionCount; ++i) {
-      const auto& R = g_Regions[i];
-      if (Addr >= R.RWBase && Addr < R.RWBase + R.Size) {
-        pthread_mutex_unlock(&g_RegionsMutex);
+    for (auto& R : g_Regions) {
+      const size_t Size = R.Size.load(std::memory_order_acquire);
+      if (Size != 0 && Addr >= R.RWBase && Addr < R.RWBase + Size) {
         return reinterpret_cast<void*>(R.RXBase + (Addr - R.RWBase));
       }
     }
-    pthread_mutex_unlock(&g_RegionsMutex);
     // Already executable (or not a JIT26 region at all) - identity.
     return Ptr;
   }
 
   inline void* ToWritable(void* Ptr) {
     const auto Addr = reinterpret_cast<uintptr_t>(Ptr);
-    pthread_mutex_lock(&g_RegionsMutex);
-    for (size_t i = 0; i < g_RegionCount; ++i) {
-      const auto& R = g_Regions[i];
-      if (Addr >= R.RXBase && Addr < R.RXBase + R.Size) {
-        pthread_mutex_unlock(&g_RegionsMutex);
+    for (auto& R : g_Regions) {
+      const size_t Size = R.Size.load(std::memory_order_acquire);
+      if (Size != 0 && Addr >= R.RXBase && Addr < R.RXBase + Size) {
         return reinterpret_cast<void*>(R.RWBase + (Addr - R.RXBase));
       }
     }
-    pthread_mutex_unlock(&g_RegionsMutex);
     // Already writable (or not a JIT26 region at all) - identity.
     return Ptr;
   }
@@ -320,13 +315,13 @@ private:
 #endif
 
 inline void VirtualFree(void* Ptr, size_t Size) {
-#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-  // Ptr is a JIT26 writable alias if (and only if) it came from VirtualAlloc(..., Execute=true) -
-  // an ordinary mach_vm_remap() mapping, safe to munmap here as usual. The RX region it aliases has
-  // no "unprepare" counterpart to JIT26's blessing, so it's deliberately left mapped (see
-  // JIT26Detail::UnregisterRegionByWritableBase).
-  JIT26Detail::UnregisterRegionByWritableBase(Ptr);
-#endif
+  // If Ptr is a JIT26 writable alias (i.e. it came from VirtualAlloc(..., Execute=true) on real
+  // iOS device), this is an ordinary mach_vm_remap() mapping and munmap()-ing it here as usual is
+  // fine. Its JIT26Detail table entry is deliberately left in place, not removed: the RX region it
+  // aliases has no "unprepare" counterpart to JIT26's blessing anyway (so it's left mapped too,
+  // matching the Unicorn backend's own JIT26 usage), and the table is append-only/lock-free
+  // specifically so ToExecutable()/ToWritable() never block a signal handler - removing entries
+  // would need synchronization that reintroduces that hazard for no real benefit.
   FEXCore::Allocator::munmap(Ptr, Size);
 }
 inline void VirtualDontNeed(void* Ptr, size_t Size, bool Recommit = true) {
