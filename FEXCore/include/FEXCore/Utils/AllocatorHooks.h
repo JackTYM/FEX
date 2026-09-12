@@ -10,6 +10,7 @@
 #ifdef __APPLE__
 #include <malloc/malloc.h>
 #include <pthread.h>
+#include <TargetConditionals.h>
 #else
 #include <malloc.h>
 #endif
@@ -153,11 +154,20 @@ inline void* VirtualAlloc(void* Base, size_t Size, bool Execute = false, bool Co
 // coarse "compile one block" / "emit one stub" boundary, not individual instruction emits, since
 // toggling has real per-call overhead.
 struct JITWriteScope {
+  // iOS has no per-thread JIT-write-protect API at all (pthread_jit_write_protect_np doesn't
+  // exist there, device or Simulator) - macOS's MAP_JIT model doesn't apply. Real device
+  // write/execute control instead needs the JIT26 breakpoint-protocol split-mapping technique,
+  // wired into this allocator separately; the Simulator needs no protection at all. No-op here
+  // is correct on both.
   JITWriteScope() {
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
     ::pthread_jit_write_protect_np(0);
+#endif
   }
   ~JITWriteScope() {
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
     ::pthread_jit_write_protect_np(1);
+#endif
   }
   JITWriteScope(const JITWriteScope&) = delete;
   JITWriteScope& operator=(const JITWriteScope&) = delete;
