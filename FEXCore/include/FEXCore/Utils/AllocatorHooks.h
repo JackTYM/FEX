@@ -192,6 +192,13 @@ namespace JIT26Detail {
     R.RWBase = reinterpret_cast<uintptr_t>(RW);
     R.RXBase = reinterpret_cast<uintptr_t>(RX);
     R.Size.store(Size, std::memory_order_release);
+
+    // Temporary device-debugging aid: a fault PC that falls in [RW, RW+Size) rather than
+    // [RX, RX+Size) means something branched to this region's writable alias instead of
+    // converting through ToExecutable() first - this line makes both sides of every registered
+    // region visible so that comparison can be made directly against a captured fault address.
+    LogMan::Msg::IFmt("JIT26: registered region RW=[0x{:x}, 0x{:x}) RX=[0x{:x}, 0x{:x})", R.RWBase, R.RWBase + Size, R.RXBase,
+                      R.RXBase + Size);
   }
 
   inline void* ToExecutable(void* Ptr) {
