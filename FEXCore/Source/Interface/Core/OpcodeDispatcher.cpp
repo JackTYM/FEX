@@ -4932,6 +4932,15 @@ void OpDispatchBuilder::INTOp(OpcodeArgs) {
   default: FEX_UNREACHABLE;
   }
 
+  // Device-triage diagnostic: compile-time confirmation of exactly which rare x86 opcode
+  // (INT imm8/INTO/INT1/HLT/UD2/INT3) is being translated into a Break IR op (and therefore which
+  // GuestSignal_SIG* stub it will eventually branch to) at which guest address - lets a real
+  // device log directly show whether e.g. INT 0x29 (__fastfail) specifically is what's compiled
+  // here, without needing runtime register capture.
+  LogMan::Msg::IFmt("[fex-diag] INTOp compiling x86 opcode=0x{:x} at GuestRIP=0x{:x}: Signal={} TrapNo={} ErrorRegister=0x{:x}",
+                    static_cast<unsigned>(Op->OP), Op->PC, static_cast<unsigned>(Reason.Signal), static_cast<unsigned>(Reason.TrapNumber),
+                    static_cast<unsigned>(Reason.ErrorRegister));
+
   // Calculate flags early.
   FlushRegisterCache();
 
