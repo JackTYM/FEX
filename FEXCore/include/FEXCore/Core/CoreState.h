@@ -361,6 +361,12 @@ struct JITPointers {
   uint64_t CompileBlockFunc {};
   uint64_t CompileSingleStepFunc {};
 
+  // Real-device-only (see the GuestSignal_* dispatcher stubs): no host hardware exception
+  // reaches FEXCore's own signal handler there, so the stubs call this directly instead of
+  // hlt/brk/faulting to synthesize the guest signal. Left unset (null) on every other
+  // platform, where the GuestSignal_* stubs keep using the fault-based mechanism.
+  uint64_t GuestSignalDispatchFunc {};
+
   FallbackABIInfo FallbackHandlerPointers[FallbackHandlerIndex::OPINDEX_MAX];
   uint64_t NamedVectorConstantPointers[FEXCore::IR::NamedVectorConstant::NAMED_VECTOR_CONST_POOL_MAX];
   uint64_t IndexedNamedVectorConstantPointers[FEXCore::IR::IndexNamedVectorConstant::INDEXED_NAMED_VECTOR_MAX];

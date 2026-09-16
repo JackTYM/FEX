@@ -325,6 +325,27 @@ void Dispatcher::EmitDispatcher() {
 #endif
   };
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+  // Real-device-only. No host hardware exception ever reaches FEXCore's in-process signal
+  // handler here (a permanently-attached debugger claims it first), so a GuestSignal_* stub
+  // can't rely on hlt/brk/faulting to synthesize the guest signal. Call the embedder directly
+  // instead - SpillStaticRegs already ran at each call site, and the embedder's callback
+  // returns the dispatcher address to resume at (see fex_vcpu::resolve_guest_signal_dispatch_target).
+  auto EmitGuestSignalDispatchFromJIT = [&]() {
+    mov(ARMEmitter::XReg::x0, STATE);
+    ldr(ARMEmitter::XReg::x1, STATE_PTR(CpuStateFrame, Pointers.GuestSignalDispatchFunc));
+
+    if (!CTX->Config.DisableVixlIndirectCalls) [[unlikely]] {
+      GenerateIndirectRuntimeCall<uint64_t, void*>(ARMEmitter::Reg::r1);
+    } else {
+      blr(ARMEmitter::Reg::r1);
+    }
+
+    mov(TMP1, ARMEmitter::XReg::x0);
+    br(TMP1);
+  };
+#endif
+
   {
     ExitFunctionLinkerAddress = GetCursorAddress<uint64_t>();
     EmitSignalGuardedRegion([&]() {
@@ -469,7 +490,11 @@ void Dispatcher::EmitDispatcher() {
 
     SpillStaticRegs(TMP1);
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+    EmitGuestSignalDispatchFromJIT();
+#else
     hlt(0);
+#endif
   }
 
   {
@@ -479,7 +504,11 @@ void Dispatcher::EmitDispatcher() {
 
     SpillStaticRegs(TMP1);
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+    EmitGuestSignalDispatchFromJIT();
+#else
     brk(0);
+#endif
   }
 
   {
@@ -499,8 +528,12 @@ void Dispatcher::EmitDispatcher() {
       PopCalleeSavedRegisters();
       ret();
     } else {
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+      EmitGuestSignalDispatchFromJIT();
+#else
       LoadConstant(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r1, 0);
       ldr(ARMEmitter::XReg::x1, ARMEmitter::Reg::r1);
+#endif
     }
   }
 
