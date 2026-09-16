@@ -90,6 +90,10 @@ private:
   uint32_t SSANodeMultiplier {24};
 
   ARMEmitter::BiDirectionalLabel* PendingTargetLabel {};
+  // The guest RIP that PendingTargetLabel resolves to, kept alongside it so a backward branch to
+  // it (a loop back-edge within one superblock) has a guest RIP available to store into State.rip
+  // before it can poll-check for a pending stop - see EmitIosPollInterruptCheck.
+  uint64_t PendingTargetLabelGuestRIP {};
   ARMEmitter::BiDirectionalLabel* PendingCallReturnTargetLabel {};
   FEXCore::Context::ContextImpl* CTX {};
   const FEXCore::IR::IRListView* IR {};
@@ -101,6 +105,11 @@ private:
   ARMEmitter::BiDirectionalLabel* JumpTarget(IR::OrderedNodeWrapper Node) {
     auto Block = IR->GetOp<IR::IROp_CodeBlock>(Node);
     return &JumpTargets[Block->ID];
+  }
+
+  uint64_t JumpTargetGuestRIP(IR::OrderedNodeWrapper Node) {
+    auto Block = IR->GetOp<IR::IROp_CodeBlock>(Node);
+    return Entry + Block->GuestEntryOffset;
   }
 
   fextl::map<IR::NodeID, ARMEmitter::BiDirectionalLabel> CallReturnTargets;
@@ -630,6 +639,14 @@ private:
   void EmitTFCheck();
 
   void EmitSuspendInterruptCheck();
+
+#ifdef FEX_IOS_POLL_INTERRUPT
+  // Polls StopRequestFlag and, if set, restores SP to the value PopCalleeSavedRegisters expects
+  // (via ResetStack) before branching to Pointers.ThreadStopHandlerSpillSRA. BackEdgeGuestRIP is
+  // set only when called from a loop back-edge (not a block's own entry point), where State.rip
+  // is otherwise stale - see EmitEntryPoint's and CompileCode's call sites.
+  void EmitIosPollInterruptCheck(std::optional<uint64_t> BackEdgeGuestRIP = std::nullopt);
+#endif
 
   void EmitEntryPoint(ARMEmitter::BackwardLabel& HeaderLabel, bool CheckTF);
 

@@ -881,6 +881,30 @@ void Arm64JITCore::EmitSuspendInterruptCheck() {
 #endif
 }
 
+#ifdef FEX_IOS_POLL_INTERRUPT
+void Arm64JITCore::EmitIosPollInterruptCheck(std::optional<uint64_t> BackEdgeGuestRIP) {
+  if (!CTX->Config.NeedsPendingInterruptFaultCheck) {
+    return;
+  }
+
+  ARMEmitter::ForwardLabel l_NoStopRequested;
+  ldr(TMP1.W(), STATE_PTR(CpuStateFrame, StopRequestFlag));
+  (void)cbz(ARMEmitter::Size::i32Bit, TMP1, &l_NoStopRequested);
+
+  if (BackEdgeGuestRIP) {
+    LoadConstant(ARMEmitter::Size::i64Bit, TMP1, *BackEdgeGuestRIP);
+    str(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.rip));
+  }
+
+  // PopCalleeSavedRegisters (run by the handler this branches to) is purely SP-post-indexed, so
+  // it needs SP back at ReturningStackLocation's value - not the block's spill-adjusted SP.
+  ResetStack();
+  ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, Pointers.ThreadStopHandlerSpillSRA));
+  br(TMP1);
+  (void)Bind(&l_NoStopRequested);
+}
+#endif
+
 void Arm64JITCore::EmitEntryPoint(ARMEmitter::BackwardLabel& HeaderLabel, bool CheckTF) {
   // Get the address of the JITCodeHeader and store in to the core state.
   // Two instruction cost, each 1 cycle.
@@ -905,16 +929,7 @@ void Arm64JITCore::EmitEntryPoint(ARMEmitter::BackwardLabel& HeaderLabel, bool C
   EmitSuspendInterruptCheck();
 
 #ifdef FEX_IOS_POLL_INTERRUPT
-  // Only wired at block entry, not at the EmitSuspendInterruptCheck() back-edge call sites in
-  // CompileCode(): State.rip is only written by ExitFunction, and a back-edge branch within a
-  // superblock (b_OrRestart from a Backward PendingTargetLabel) never goes through that, so
-  // State.rip could be stale there when the thread is later resumed from where this stopped it.
-  ARMEmitter::ForwardLabel l_NoStopRequested;
-  ldr(TMP1.W(), STATE_PTR(CpuStateFrame, StopRequestFlag));
-  (void)cbz(ARMEmitter::Size::i32Bit, TMP1, &l_NoStopRequested);
-  ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, Pointers.ThreadStopHandlerSpillSRA));
-  br(TMP1);
-  (void)Bind(&l_NoStopRequested);
+  EmitIosPollInterruptCheck();
 #endif
 }
 
@@ -1037,6 +1052,9 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
       if (PendingTargetLabel && PendingTargetLabel != Target) {
         if (PendingTargetLabel->Backward.Location) {
           EmitSuspendInterruptCheck();
+#ifdef FEX_IOS_POLL_INTERRUPT
+          EmitIosPollInterruptCheck(PendingTargetLabelGuestRIP);
+#endif
         }
         b_OrRestart(PendingTargetLabel);
         PendingTargetLabel = nullptr;
@@ -1093,6 +1111,9 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
   if (PendingTargetLabel) {
     if (PendingTargetLabel->Backward.Location) {
       EmitSuspendInterruptCheck();
+#ifdef FEX_IOS_POLL_INTERRUPT
+      EmitIosPollInterruptCheck(PendingTargetLabelGuestRIP);
+#endif
     }
     b_OrRestart(PendingTargetLabel);
   }
