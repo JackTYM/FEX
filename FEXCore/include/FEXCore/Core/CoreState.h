@@ -437,6 +437,12 @@ struct CpuStateFrame {
   uint32_t SuspendDoorbell {};
 #endif
 
+  // Polled at JIT block entry on real iOS device (FEX_IOS_POLL_INTERRUPT), replacing the
+  // InterruptFaultPage fault trick there: a permanently-attached debugger claims every hardware
+  // exception before an in-process signal handler ever sees it, so that mechanism cannot fire on
+  // that platform. Set by the embedder's request_thread_stop(), cleared once the stop is serviced.
+  uint32_t StopRequestFlag {};
+
   // DEBUG AID (kept intentionally, cheap): captures STATE's own value the moment ExitFunctionLinkerAddress's trampoline is
   // entered (before SpillStaticRegs/any other work), to check whether it's already wrong at that
   // point vs. becoming wrong later. Read from the embedder's crash handler.
