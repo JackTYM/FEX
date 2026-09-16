@@ -94,6 +94,12 @@ private:
   // it (a loop back-edge within one superblock) has a guest RIP available to store into State.rip
   // before it can poll-check for a pending stop - see EmitIosPollInterruptCheck.
   uint64_t PendingTargetLabelGuestRIP {};
+  // True when PendingTargetLabel's target block is JIT-synthesized (created via
+  // OpDispatchBuilder::CreateNewCodeBlockAfter/AtEnd, e.g. multi-block REP string op codegen)
+  // rather than produced by CreateJumpBlocks from the real decoded instruction stream. Such
+  // blocks default GuestEntryOffset to 0 without ever setting EntryPoint, so
+  // PendingTargetLabelGuestRIP is not a real guest RIP for them - see JumpTargetIsSynthesizedBlock.
+  bool PendingTargetLabelIsSynthesizedBlock {};
   ARMEmitter::BiDirectionalLabel* PendingCallReturnTargetLabel {};
   FEXCore::Context::ContextImpl* CTX {};
   const FEXCore::IR::IRListView* IR {};
@@ -110,6 +116,14 @@ private:
   uint64_t JumpTargetGuestRIP(IR::OrderedNodeWrapper Node) {
     auto Block = IR->GetOp<IR::IROp_CodeBlock>(Node);
     return Entry + Block->GuestEntryOffset;
+  }
+
+  // A genuinely decoded block at file offset 0 is always the region's entry block (EntryPoint ==
+  // true - see Frontend.cpp's EntryBlock handling), so GuestEntryOffset == 0 && !EntryPoint
+  // uniquely identifies a synthesized block with no real guest RIP.
+  bool JumpTargetIsSynthesizedBlock(IR::OrderedNodeWrapper Node) {
+    auto Block = IR->GetOp<IR::IROp_CodeBlock>(Node);
+    return !Block->EntryPoint && Block->GuestEntryOffset == 0;
   }
 
   fextl::map<IR::NodeID, ARMEmitter::BiDirectionalLabel> CallReturnTargets;
@@ -642,13 +656,14 @@ private:
 
 #ifdef FEX_IOS_POLL_INTERRUPT
   // Polls StopRequestFlag and, if set, restores SP to the value PopCalleeSavedRegisters expects
-  // (via ResetStack) before branching to Pointers.ThreadStopHandlerSpillSRA. BackEdgeGuestRIP is
-  // set only when called from a loop back-edge (not a block's own entry point), where State.rip
-  // is otherwise stale - see EmitEntryPoint's and CompileCode's call sites.
-  void EmitIosPollInterruptCheck(std::optional<uint64_t> BackEdgeGuestRIP = std::nullopt);
+  // (via ResetStack) before branching to Pointers.ThreadStopHandlerSpillSRA. GuestRIP is stored
+  // into State.rip first, since State.rip is not kept fresh at every poll site (linked direct
+  // branches and L1 cache hits skip past any RIP store) - see EmitEntryPoint's and CompileCode's
+  // call sites for how the correct value is obtained at each site.
+  void EmitIosPollInterruptCheck(std::optional<uint64_t> GuestRIP = std::nullopt);
 #endif
 
-  void EmitEntryPoint(ARMEmitter::BackwardLabel& HeaderLabel, bool CheckTF);
+  void EmitEntryPoint(ARMEmitter::BackwardLabel& HeaderLabel, bool CheckTF, [[maybe_unused]] uint64_t BlockStartRIP);
 
 #define DEF_OP(x) void Op_##x(IR::IROp_Header const* IROp, IR::Ref Node)
 

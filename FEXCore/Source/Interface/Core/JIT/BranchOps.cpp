@@ -238,6 +238,7 @@ DEF_OP(Jump) {
 
   PendingTargetLabel = JumpTarget(Op->TargetBlock);
   PendingTargetLabelGuestRIP = JumpTargetGuestRIP(Op->TargetBlock);
+  PendingTargetLabelIsSynthesizedBlock = JumpTargetIsSynthesizedBlock(Op->TargetBlock);
 }
 
 DEF_OP(CondJump) {
@@ -276,6 +277,7 @@ DEF_OP(CondJump) {
 
   PendingTargetLabel = JumpTarget(Op->FalseBlock);
   PendingTargetLabelGuestRIP = JumpTargetGuestRIP(Op->FalseBlock);
+  PendingTargetLabelIsSynthesizedBlock = JumpTargetIsSynthesizedBlock(Op->FalseBlock);
 }
 
 DEF_OP(Syscall) {

@@ -882,7 +882,7 @@ void Arm64JITCore::EmitSuspendInterruptCheck() {
 }
 
 #ifdef FEX_IOS_POLL_INTERRUPT
-void Arm64JITCore::EmitIosPollInterruptCheck(std::optional<uint64_t> BackEdgeGuestRIP) {
+void Arm64JITCore::EmitIosPollInterruptCheck(std::optional<uint64_t> GuestRIP) {
   if (!CTX->Config.NeedsPendingInterruptFaultCheck) {
     return;
   }
@@ -891,8 +891,8 @@ void Arm64JITCore::EmitIosPollInterruptCheck(std::optional<uint64_t> BackEdgeGue
   ldr(TMP1.W(), STATE_PTR(CpuStateFrame, StopRequestFlag));
   (void)cbz(ARMEmitter::Size::i32Bit, TMP1, &l_NoStopRequested);
 
-  if (BackEdgeGuestRIP) {
-    LoadConstant(ARMEmitter::Size::i64Bit, TMP1, *BackEdgeGuestRIP);
+  if (GuestRIP) {
+    LoadConstant(ARMEmitter::Size::i64Bit, TMP1, *GuestRIP);
     str(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.rip));
   }
 
@@ -905,7 +905,7 @@ void Arm64JITCore::EmitIosPollInterruptCheck(std::optional<uint64_t> BackEdgeGue
 }
 #endif
 
-void Arm64JITCore::EmitEntryPoint(ARMEmitter::BackwardLabel& HeaderLabel, bool CheckTF) {
+void Arm64JITCore::EmitEntryPoint(ARMEmitter::BackwardLabel& HeaderLabel, bool CheckTF, [[maybe_unused]] uint64_t BlockStartRIP) {
   // Get the address of the JITCodeHeader and store in to the core state.
   // Two instruction cost, each 1 cycle.
   adr_OrRestart(TMP1, &HeaderLabel);
@@ -929,7 +929,7 @@ void Arm64JITCore::EmitEntryPoint(ARMEmitter::BackwardLabel& HeaderLabel, bool C
   EmitSuspendInterruptCheck();
 
 #ifdef FEX_IOS_POLL_INTERRUPT
-  EmitIosPollInterruptCheck();
+  EmitIosPollInterruptCheck(BlockStartRIP);
 #endif
 }
 
@@ -1053,7 +1053,16 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
         if (PendingTargetLabel->Backward.Location) {
           EmitSuspendInterruptCheck();
 #ifdef FEX_IOS_POLL_INTERRUPT
-          EmitIosPollInterruptCheck(PendingTargetLabelGuestRIP);
+          // A synthesized block's GuestEntryOffset is always 0, which is not a real guest RIP -
+          // storing it into State.rip and stopping here would resume execution at the start of
+          // the whole compiled region instead of at the loop this back-edge belongs to, silently
+          // corrupting guest state (e.g. mid-REP register values already partially advanced).
+          // Leaving this specific back-edge unpreempted is a narrower, pre-existing-shaped gap:
+          // DEF_OP(CondJump)'s true-target edge already has no interrupt check at all upstream,
+          // so back-edge coverage was always partial.
+          if (!PendingTargetLabelIsSynthesizedBlock) {
+            EmitIosPollInterruptCheck(PendingTargetLabelGuestRIP);
+          }
 #endif
         }
         b_OrRestart(PendingTargetLabel);
@@ -1077,7 +1086,7 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
         CodeData.EntryPoints.emplace(BlockStartRIP, GetCursorAddress<uint8_t*>());
         DebugData->GuestOpcodes.push_back({BlockIROp->GuestEntryOffset, GetCursorAddress<uint8_t*>() - CodeData.BlockBegin});
 
-        EmitEntryPoint(JITCodeHeaderLabel, CheckTF);
+        EmitEntryPoint(JITCodeHeaderLabel, CheckTF, BlockStartRIP);
       }
 
       if (PendingCallReturnTargetLabel) {
@@ -1112,7 +1121,11 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
     if (PendingTargetLabel->Backward.Location) {
       EmitSuspendInterruptCheck();
 #ifdef FEX_IOS_POLL_INTERRUPT
-      EmitIosPollInterruptCheck(PendingTargetLabelGuestRIP);
+      // See the matching back-edge check earlier in this function for why synthesized blocks
+      // are deliberately skipped here.
+      if (!PendingTargetLabelIsSynthesizedBlock) {
+        EmitIosPollInterruptCheck(PendingTargetLabelGuestRIP);
+      }
 #endif
     }
     b_OrRestart(PendingTargetLabel);
