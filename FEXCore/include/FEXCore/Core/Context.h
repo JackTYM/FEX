@@ -193,6 +193,29 @@ public:
   FEX_DEFAULT_VISIBILITY virtual void SetWow64GuestRebaseValue(uint64_t RebaseValue) = 0;
 
   /**
+   * @brief sogen-specific: keeps whichever CodeBuffer currently contains HostAddress alive, even if
+   * FEXCore's own CurrentCodeBuffer/ClearCodeCache bookkeeping would otherwise let its refcount
+   * reach zero and free it. Needed by embedders that multiplex several logical execution contexts
+   * onto a single InternalThreadState/CPUBackend (so a parked context's saved RIP/InlineJITBlockHeader
+   * can outlive the CPUBackend's own CurrentCodeBuffer moving on to a newer buffer). A no-op if
+   * HostAddress does not currently fall within any known CodeBuffer. Retains are refcounted per
+   * CodeBuffer; pair every call with a matching ReleaseCodeBufferAt(HostAddress) once the caller no
+   * longer needs that buffer kept alive.
+   *
+   * @param HostAddress A host address inside the CodeBuffer to retain.
+   */
+  FEX_DEFAULT_VISIBILITY virtual void RetainCodeBufferAt(uintptr_t HostAddress) = 0;
+
+  /**
+   * @brief sogen-specific: releases one reference previously taken by RetainCodeBufferAt(HostAddress).
+   * A no-op if HostAddress does not currently fall within any known CodeBuffer, or if it has no
+   * outstanding retained references.
+   *
+   * @param HostAddress The same host address previously passed to RetainCodeBufferAt.
+   */
+  FEX_DEFAULT_VISIBILITY virtual void ReleaseCodeBufferAt(uintptr_t HostAddress) = 0;
+
+  /**
    * @brief Enable exiting the JIT when HLT is hit.
    *
    * This is to workaround a bug in Wine's longjump function which breaks our unittests.
