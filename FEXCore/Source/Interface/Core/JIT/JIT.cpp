@@ -539,9 +539,16 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
   // against trusted references before dereferencing them:
   //   - Frame must equal the executing thread's CurrentFrame (a const, never-reassigned mirror reached
   //     via the ExitLinkTrustedThread anchor, independent of the possibly-corrupt Frame argument).
-  //   - Record must lie inside this thread's JIT code buffer (the ExitFunctionLinkData struct is
-  //     emitted inline there); otherwise JumpThunkStartAddress/CallerAddress would be a wild
-  //     self-modifying write and Record->GuestRIP a wild read.
+  //   - Record must lie inside a JIT code buffer this thread could legitimately still be executing
+  //     from (the ExitFunctionLinkData struct is emitted inline there); otherwise
+  //     JumpThunkStartAddress/CallerAddress would be a wild self-modifying write and Record->GuestRIP
+  //     a wild read. Under sogen's shared-InternalThreadState-across-many-logical-threads model, a
+  //     parked thread can resume into a buffer that is no longer CurrentCodeBuffer but is still alive
+  //     because RetainCodeBufferAt kept it so (see Context.cpp) - CPUBackend::IsAddressInCodeBuffer
+  //     alone only checks CurrentCodeBuffer plus the signal-handler safety net, so it's checked first
+  //     as the cheap common case and ContextImpl::FindCodeBufferContaining (a weak_ptr-based walk of
+  //     every buffer ever allocated, correctly distinguishing alive-but-not-current from genuinely
+  //     freed) is only consulted as a fallback, to avoid false-positive bails on perfectly valid code.
   // Both checks are branch-cheap and the diagnostic path is cold. When the anchor is unavailable the
   // guard is skipped entirely, so behavior is never worse than baseline.
   if (auto* TrustedThread = ExitLinkTrustedThread) {
@@ -552,7 +559,9 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
       write(STDERR_FILENO, Buf, Len);
       Frame = TrustedThread->CurrentFrame;
     }
-    if (!TrustedThread->CPUBackend.get()->IsAddressInCodeBuffer(reinterpret_cast<uintptr_t>(Record))) {
+    const auto RecordAddress = reinterpret_cast<uintptr_t>(Record);
+    if (!TrustedThread->CPUBackend.get()->IsAddressInCodeBuffer(RecordAddress) &&
+        !static_cast<Context::ContextImpl*>(TrustedThread->CTX)->FindCodeBufferContaining(RecordAddress)) {
       char Buf[160];
       auto Len = snprintf(Buf, sizeof(Buf), "[FEX ExitFunctionLink] Record %p outside code buffer; bailing to dispatcher loop top\n",
                           static_cast<void*>(Record));

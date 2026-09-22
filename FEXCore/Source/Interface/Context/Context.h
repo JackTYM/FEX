@@ -231,6 +231,8 @@ public:
   void RetainCodeBufferAt(uintptr_t HostAddress) override;
   void ReleaseCodeBufferAt(uintptr_t HostAddress) override;
 
+  fextl::shared_ptr<CPU::CodeBuffer> FindCodeBufferContaining(uintptr_t HostAddress);
+
   // returns false if a handler was already registered
   std::optional<CustomIRResult>
   AddCustomIREntrypoint(uintptr_t Entrypoint, CustomIREntrypointHandler Handler, void* Creator = nullptr, void* Data = nullptr);
@@ -505,8 +507,6 @@ private:
 
   std::mutex CodeBufferListLock;
   fextl::vector<std::weak_ptr<CPU::CodeBuffer>> CodeBufferList;
-
-  fextl::shared_ptr<CPU::CodeBuffer> FindCodeBufferContaining(uintptr_t HostAddress);
 
   std::mutex RetainedCodeBufferLock;
   fextl::unordered_map<CPU::CodeBuffer*, std::pair<fextl::shared_ptr<CPU::CodeBuffer>, uint32_t>> RetainedCodeBuffers;
