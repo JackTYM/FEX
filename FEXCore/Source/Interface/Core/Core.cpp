@@ -349,10 +349,8 @@ bool ContextImpl::InitCore() {
   SignalDelegation->SetConfig(Dispatcher->MakeSignalDelegatorConfig());
 
 #if !defined(ARCHITECTURE_arm64ec)
-  // Cross-thread quantum-timer preemption (stop() protecting InterruptFaultPage to force the
-  // next translated block's entry to fault) needs this unconditionally, not just when hosted by
-  // a real Windows WOW64 process - sogen's own macOS embedding relies on the exact same
-  // mechanism and would otherwise never emit the fault-triggering store at all.
+  // stop()'s cross-thread preemption (protecting InterruptFaultPage) needs this unconditionally,
+  // not just under real WOW64 - embedders using the same mechanism outside WOW64 need it too.
   Config.NeedsPendingInterruptFaultCheck = true;
 #endif
 
