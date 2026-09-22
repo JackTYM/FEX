@@ -55,4 +55,53 @@ FEXCore::CPUID::FunctionResults FEXCore::Context::ContextImpl::RunCPUIDFunctionN
 bool FEXCore::Context::ContextImpl::IsAddressInCodeBuffer(FEXCore::Core::InternalThreadState* Thread, uintptr_t Address) const {
   return Thread->CPUBackend->IsAddressInCodeBuffer(Address) || CodeCache.IsAddressInMappedCodeBuffer(Address);
 }
+
+fextl::shared_ptr<CPU::CodeBuffer> FEXCore::Context::ContextImpl::FindCodeBufferContaining(uintptr_t HostAddress) {
+  std::scoped_lock lk {CodeBufferListLock};
+  for (auto& WeakBuffer : CodeBufferList) {
+    if (auto Buffer = WeakBuffer.lock()) {
+      const auto Base = reinterpret_cast<uintptr_t>(Buffer->Ptr);
+      if (HostAddress >= Base && HostAddress < Base + Buffer->AllocatedSize) {
+        return Buffer;
+      }
+    }
+  }
+  return nullptr;
+}
+
+void FEXCore::Context::ContextImpl::RetainCodeBufferAt(uintptr_t HostAddress) {
+  if (HostAddress == 0) {
+    return;
+  }
+
+  auto Buffer = FindCodeBufferContaining(HostAddress);
+  if (!Buffer) {
+    return;
+  }
+
+  std::scoped_lock lk {RetainedCodeBufferLock};
+  auto [It, Inserted] = RetainedCodeBuffers.try_emplace(Buffer.get(), std::move(Buffer), 0);
+  It->second.second++;
+}
+
+void FEXCore::Context::ContextImpl::ReleaseCodeBufferAt(uintptr_t HostAddress) {
+  if (HostAddress == 0) {
+    return;
+  }
+
+  auto Buffer = FindCodeBufferContaining(HostAddress);
+  if (!Buffer) {
+    return;
+  }
+
+  std::scoped_lock lk {RetainedCodeBufferLock};
+  auto It = RetainedCodeBuffers.find(Buffer.get());
+  if (It == RetainedCodeBuffers.end()) {
+    return;
+  }
+
+  if (--It->second.second == 0) {
+    RetainedCodeBuffers.erase(It);
+  }
+}
 } // namespace FEXCore::Context
