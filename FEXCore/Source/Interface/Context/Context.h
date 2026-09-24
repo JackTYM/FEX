@@ -230,6 +230,7 @@ public:
 
   void RetainCodeBufferAt(uintptr_t HostAddress) override;
   void ReleaseCodeBufferAt(uintptr_t HostAddress) override;
+  uintptr_t FindHostAddressForGuestRIP(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP) override;
 
   fextl::shared_ptr<CPU::CodeBuffer> FindCodeBufferContaining(uintptr_t HostAddress);
 
