@@ -562,9 +562,11 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
     const auto RecordAddress = reinterpret_cast<uintptr_t>(Record);
     if (!TrustedThread->CPUBackend.get()->IsAddressInCodeBuffer(RecordAddress) &&
         !static_cast<Context::ContextImpl*>(TrustedThread->CTX)->FindCodeBufferContaining(RecordAddress)) {
-      char Buf[160];
-      auto Len = snprintf(Buf, sizeof(Buf), "[FEX ExitFunctionLink] Record %p outside code buffer; bailing to dispatcher loop top\n",
-                          static_cast<void*>(Record));
+      char Buf[256];
+      auto* CurBuf = static_cast<Arm64JITCore*>(TrustedThread->CPUBackend.get())->CurrentCodeBuffer.get();
+      auto Len = snprintf(Buf, sizeof(Buf),
+                          "[FEX ExitFunctionLink] Record %p outside code buffer (current %p+0x%zx); bailing to dispatcher loop top\n",
+                          static_cast<void*>(Record), CurBuf ? static_cast<void*>(CurBuf->Ptr) : nullptr, CurBuf ? CurBuf->AllocatedSize : 0);
       write(STDERR_FILENO, Buf, Len);
       // No trustworthy GuestRIP can be recovered from a corrupt Record, so re-dispatch from the
       // trusted frame's current rip rather than linking or jumping to a computed-from-garbage target.
