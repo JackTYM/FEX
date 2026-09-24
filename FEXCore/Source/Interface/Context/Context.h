@@ -230,6 +230,7 @@ public:
 
   void RetainCodeBufferAt(uintptr_t HostAddress) override;
   void ReleaseCodeBufferAt(uintptr_t HostAddress) override;
+  uintptr_t FindHostAddressForGuestRIP(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP) override;
 
   // returns false if a handler was already registered
   std::optional<CustomIRResult>

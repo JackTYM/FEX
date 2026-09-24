@@ -174,6 +174,12 @@ uint64_t ContextImpl::RestoreRIPFromHostPC(FEXCore::Core::InternalThreadState* T
   return Frame->State.rip;
 }
 
+uintptr_t ContextImpl::FindHostAddressForGuestRIP(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP) {
+  // LookupCache::FindBlock already returns 0 for a miss, matching RetainCodeBufferAt/
+  // ReleaseCodeBufferAt's own no-op-on-zero contract - nothing to translate here.
+  return Thread->LookupCache->FindBlock(Thread, GuestRIP);
+}
+
 uint32_t ContextImpl::ReconstructCompactedEFLAGS(FEXCore::Core::InternalThreadState* Thread, bool WasInJIT, const uint64_t* HostGPRs,
                                                  uint64_t PSTATE) {
   const auto Frame = Thread->CurrentFrame;
