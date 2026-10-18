@@ -70,7 +70,7 @@ void OpDispatchBuilder::SyscallOp(OpcodeArgs, bool IsSyscallInst) {
 
   const auto GPRSize = GetGPROpSize();
   auto NewRIP = GetRelocatedPC(Op, -Op->InstSize);
-  _StoreContextGPR(GPRSize, NewRIP, offsetof(FEXCore::Core::CPUState, rip));
+  _StoreContextGPR(OpSize::i64Bit, NewRIP, offsetof(FEXCore::Core::CPUState, rip));
 
   Ref Arguments[SyscallArgs] {
     InvalidNode, InvalidNode, InvalidNode, InvalidNode, InvalidNode, InvalidNode, InvalidNode,
@@ -4971,10 +4971,10 @@ void OpDispatchBuilder::INTOp(OpcodeArgs) {
 
     // We want to set RIP to the next instruction after INT3/INT1
     auto NewRIP = GetRelocatedPC(Op);
-    _StoreContextGPR(GPRSize, NewRIP, offsetof(FEXCore::Core::CPUState, rip));
+    _StoreContextGPR(OpSize::i64Bit, NewRIP, offsetof(FEXCore::Core::CPUState, rip));
   } else if (Op->OP != 0xCE) {
     auto NewRIP = GetRelocatedPC(Op, -Op->InstSize);
-    _StoreContextGPR(GPRSize, NewRIP, offsetof(FEXCore::Core::CPUState, rip));
+    _StoreContextGPR(OpSize::i64Bit, NewRIP, offsetof(FEXCore::Core::CPUState, rip));
   }
 
   if (Op->OP == 0xCE) { // Conditional to only break if Overflow == 1
@@ -4989,7 +4989,7 @@ void OpDispatchBuilder::INTOp(OpcodeArgs) {
     StartNewBlock();
 
     auto NewRIP = GetRelocatedPC(Op);
-    _StoreContextGPR(GPRSize, NewRIP, offsetof(FEXCore::Core::CPUState, rip));
+    _StoreContextGPR(OpSize::i64Bit, NewRIP, offsetof(FEXCore::Core::CPUState, rip));
     Break(Reason);
 
     // Make sure to start a new block after ending this one
@@ -5213,7 +5213,7 @@ void OpDispatchBuilder::BreakOp(OpcodeArgs, FEXCore::IR::BreakDefinition BreakDe
 
   // We don't actually support this instruction
   // Multiblock may hit it though
-  _StoreContextGPR(GPRSize, GetRelocatedPC(Op, -Op->InstSize), offsetof(FEXCore::Core::CPUState, rip));
+  _StoreContextGPR(OpSize::i64Bit, GetRelocatedPC(Op, -Op->InstSize), offsetof(FEXCore::Core::CPUState, rip));
   Break(BreakDefinition);
 
 
