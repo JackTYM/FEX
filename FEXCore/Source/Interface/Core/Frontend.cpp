@@ -1363,15 +1363,11 @@ const Decoder::DecodeStream Decoder::AdjustAddrForSpecialRegion(const uint8_t* _
   // 32-bit guest's entire address space is permanently unmappable, so the embedder backs it at a
   // rebased host address instead. InstStream stays the real guest VA (used for
   // QueryGuestExecutableRange/CheckRangeExecutable below) - only the pointer actually read from is
-  // rebased. A 32-bit-mode Context's RIP is always below WOW64_GUEST_ADDRESS_SPACE_SIZE already, so
-  // the rebase applies unconditionally there; a 64-bit-mode Context belonging to a wow64 process
-  // (CTX->Config.NeedsWow64GuestRebase - see GuestRebaseInfo's doc comment) needs the same runtime
-  // check as data accesses, since sogen deliberately places some real 64-bit-executed content (the
-  // heaven's-gate trampoline, wow64cpu.dll) below 4GB for 32-bit-pointer reachability.
+  // rebased. Only embedders that opt in (CTX->Config.NeedsWow64GuestRebase) get it, and only below
+  // WOW64_GUEST_ADDRESS_SPACE_SIZE: a mixed-mode wow64 process also runs 64-bit code below 4GB (the
+  // heaven's-gate trampoline, wow64cpu.dll) that needs the same treatment as 32-bit code.
   uint64_t Rebase = 0;
-  if (!CTX->Config.Is64BitMode) {
-    Rebase = CTX->Config.Wow64GuestRebaseValue;
-  } else if (CTX->Config.NeedsWow64GuestRebase && RIP < IR::WOW64_GUEST_ADDRESS_SPACE_SIZE) {
+  if (CTX->Config.NeedsWow64GuestRebase && RIP < IR::WOW64_GUEST_ADDRESS_SPACE_SIZE) {
     Rebase = CTX->Config.Wow64GuestRebaseValue;
   }
   return DecodeStream {
@@ -1398,10 +1394,12 @@ void Decoder::DecodeInstructionsAtEntry(FEXCore::Core::InternalThreadState* Thre
   MaxCondBranchBackwards = ~0ULL;
   DecodedBuffer = PoolObject.ReownOrClaimBuffer();
 
-  // Decode operating mode from thread's CS segment.
+  // Decode operating mode from thread's CS segment. A 64-bit Context may also run compatibility-mode
+  // (32-bit) blocks, as a WoW64 process switches between both via far transfers. The reverse is not
+  // possible: a 32-bit Context reserves fewer host registers than 64-bit code needs.
   const auto CSSegment = Core::CPUState::GetSegmentFromIndex(Thread->CurrentFrame->State, Thread->CurrentFrame->State.cs_idx);
   BlockInfo.Is64BitMode = CSSegment->L == 1;
-  LOGMAN_THROW_A_FMT(BlockInfo.Is64BitMode == CTX->Config.Is64BitMode, "Expected operating mode to not change at runtime!");
+  LOGMAN_THROW_A_FMT(!BlockInfo.Is64BitMode || CTX->Config.Is64BitMode, "64-bit code in a 32-bit Context!");
 
   EntryPoint = PC;
   BlockInfo.EntryPoints = {PC};

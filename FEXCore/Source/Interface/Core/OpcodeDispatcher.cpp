@@ -1015,6 +1015,51 @@ void OpDispatchBuilder::CALLFARIndirectOp(OpcodeArgs) {
   ExitFunction(RIPOffset);
 }
 
+void OpDispatchBuilder::JUMPFARImmediateOp(OpcodeArgs) {
+  // ptr16:16 operands (operand size override) are not supported.
+  if ((Op->Flags & FEXCore::X86Tables::DecodeFlags::FLAG_OPERAND_SIZE) != 0) {
+    LogMan::Msg::EFmt("Far JMP only implemented for ptr16:32");
+    DecodeFailure = true;
+    return;
+  }
+
+  CalculateDeferredFlags();
+
+  BlockSetRIP = true;
+
+  const uint64_t Pointer = Op->Src[0].Literal();
+  const auto NewSegmentCS = Constant(static_cast<uint16_t>(Pointer >> 32));
+
+  _StoreContextGPR(OpSize::i16Bit, NewSegmentCS, offsetof(FEXCore::Core::CPUState, cs_idx));
+  UpdatePrefixFromSegment(NewSegmentCS, FEXCore::X86Tables::DecodeFlags::FLAG_CS_PREFIX);
+
+  ExitFunction(Constant(static_cast<uint32_t>(Pointer)));
+}
+
+void OpDispatchBuilder::CALLFARImmediateOp(OpcodeArgs) {
+  if ((Op->Flags & FEXCore::X86Tables::DecodeFlags::FLAG_OPERAND_SIZE) != 0) {
+    LogMan::Msg::EFmt("Far CALL only implemented for ptr16:32");
+    DecodeFailure = true;
+    return;
+  }
+
+  CalculateDeferredFlags();
+
+  BlockSetRIP = true;
+
+  const uint64_t Pointer = Op->Src[0].Literal();
+  const auto NewSegmentCS = Constant(static_cast<uint16_t>(Pointer >> 32));
+  auto CurrentCS = _LoadContextGPR(OpSize::i16Bit, offsetof(FEXCore::Core::CPUState, cs_idx));
+
+  Push(OpSize::i32Bit, CurrentCS);
+  Push(OpSize::i32Bit, GetRelocatedPC(Op));
+
+  _StoreContextGPR(OpSize::i16Bit, NewSegmentCS, offsetof(FEXCore::Core::CPUState, cs_idx));
+  UpdatePrefixFromSegment(NewSegmentCS, FEXCore::X86Tables::DecodeFlags::FLAG_CS_PREFIX);
+
+  ExitFunction(Constant(static_cast<uint32_t>(Pointer)));
+}
+
 void OpDispatchBuilder::RETFARIndirectOp(OpcodeArgs) {
   const auto GPRSize = GetGPROpSize();
   const auto SrcSize = Op->Flags & FEXCore::X86Tables::DecodeFlags::FLAG_REX_WIDENING ? OpSize::i64Bit : OpSize::i32Bit;
@@ -1321,23 +1366,14 @@ void OpDispatchBuilder::MOVSegOp(OpcodeArgs, bool ToSeg) {
       break;
     case FEXCore::X86State::REG_RBP: // GS
     case FEXCore::X86State::REG_R13: // GS
-      if (!Is64BitMode) {
-        _StoreContextGPR(OpSize::i16Bit, Src, offsetof(FEXCore::Core::CPUState, gs_idx));
-        UpdatePrefixFromSegment(Src, FEXCore::X86Tables::DecodeFlags::FLAG_GS_PREFIX);
-      } else {
-        LogMan::Msg::EFmt("We don't support modifying GS selector in 64bit mode!");
-        DecodeFailure = true;
-      }
+      // As on hardware, in 64-bit mode this also replaces the 64-bit base with the descriptor's 32-bit base.
+      _StoreContextGPR(OpSize::i16Bit, Src, offsetof(FEXCore::Core::CPUState, gs_idx));
+      UpdatePrefixFromSegment(Src, FEXCore::X86Tables::DecodeFlags::FLAG_GS_PREFIX);
       break;
     case FEXCore::X86State::REG_RSP: // FS
     case FEXCore::X86State::REG_R12: // FS
-      if (!Is64BitMode) {
-        _StoreContextGPR(OpSize::i16Bit, Src, offsetof(FEXCore::Core::CPUState, fs_idx));
-        UpdatePrefixFromSegment(Src, FEXCore::X86Tables::DecodeFlags::FLAG_FS_PREFIX);
-      } else {
-        LogMan::Msg::EFmt("We don't support modifying FS selector in 64bit mode!");
-        DecodeFailure = true;
-      }
+      _StoreContextGPR(OpSize::i16Bit, Src, offsetof(FEXCore::Core::CPUState, fs_idx));
+      UpdatePrefixFromSegment(Src, FEXCore::X86Tables::DecodeFlags::FLAG_FS_PREFIX);
       break;
     default: UnimplementedOp(Op); return;
     }
@@ -1363,19 +1399,11 @@ void OpDispatchBuilder::MOVSegOp(OpcodeArgs, bool ToSeg) {
       break;
     case FEXCore::X86State::REG_RBP: // GS
     case FEXCore::X86State::REG_R13: // GS
-      if (Is64BitMode) {
-        Segment = Constant(0);
-      } else {
-        Segment = _LoadContextGPR(OpSize::i16Bit, offsetof(FEXCore::Core::CPUState, gs_idx));
-      }
+      Segment = _LoadContextGPR(OpSize::i16Bit, offsetof(FEXCore::Core::CPUState, gs_idx));
       break;
     case FEXCore::X86State::REG_RSP: // FS
     case FEXCore::X86State::REG_R12: // FS
-      if (Is64BitMode) {
-        Segment = Constant(0);
-      } else {
-        Segment = _LoadContextGPR(OpSize::i16Bit, offsetof(FEXCore::Core::CPUState, fs_idx));
-      }
+      Segment = _LoadContextGPR(OpSize::i16Bit, offsetof(FEXCore::Core::CPUState, fs_idx));
       break;
     default: UnimplementedOp(Op); return;
     }
@@ -4077,7 +4105,7 @@ void OpDispatchBuilder::BeginFunction(uint64_t RIP, const fextl::vector<FEXCore:
                                       uint32_t NumInstructions, bool _Is64BitMode, bool MonoBackpatcherBlock) {
   Entry = RIP;
   Is64BitMode = _Is64BitMode;
-  LOGMAN_THROW_A_FMT(Is64BitMode == CTX->Config.Is64BitMode, "Expected operating mode to not change at runtime!");
+  LOGMAN_THROW_A_FMT(!Is64BitMode || CTX->Config.Is64BitMode, "64-bit code in a 32-bit Context!");
   IsMonoBackpatcherBlock = MonoBackpatcherBlock;
   auto IRHeader = _IRHeader(InvalidNode, RIP, 0, NumInstructions, 0, 0);
   CreateJumpBlocks(Blocks);
@@ -4305,11 +4333,12 @@ void OpDispatchBuilder::UpdatePrefixFromSegment(Ref Segment, uint32_t SegmentReg
   case FEXCore::X86Tables::DecodeFlags::FLAG_DS_PREFIX:
     _StoreContextGPR(OpSize::i32Bit, NewSegment, offsetof(FEXCore::Core::CPUState, ds_cached));
     break;
+  // FS/GS bases are 64-bit: a selector load in 64-bit mode must clear a previous 64-bit base's upper half.
   case FEXCore::X86Tables::DecodeFlags::FLAG_FS_PREFIX:
-    _StoreContextGPR(OpSize::i32Bit, NewSegment, offsetof(FEXCore::Core::CPUState, fs_cached));
+    _StoreContextGPR(OpSize::i64Bit, _Bfe(OpSize::i64Bit, 32, 0, NewSegment), offsetof(FEXCore::Core::CPUState, fs_cached));
     break;
   case FEXCore::X86Tables::DecodeFlags::FLAG_GS_PREFIX:
-    _StoreContextGPR(OpSize::i32Bit, NewSegment, offsetof(FEXCore::Core::CPUState, gs_cached));
+    _StoreContextGPR(OpSize::i64Bit, _Bfe(OpSize::i64Bit, 32, 0, NewSegment), offsetof(FEXCore::Core::CPUState, gs_cached));
     break;
   default: break; // Do nothing
   }

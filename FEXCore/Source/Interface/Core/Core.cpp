@@ -646,13 +646,10 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
           // guest address; rebase it the same way instruction fetch does, so this reads the
           // embedder's real host backing for 32-bit guest memory instead of the (permanently
           // unmapped, on Apple Silicon macOS) literal guest address. See Frontend.cpp's
-          // AdjustAddrForSpecialRegion for why a 64-bit-mode Context belonging to a wow64 process
-          // (Config.NeedsWow64GuestRebase) also needs this, conditionally.
+          // AdjustAddrForSpecialRegion.
           const uint64_t CheckAddress = Block.Entry + BlockInstructionsLength;
           uint64_t Rebase = 0;
-          if (!Config.Is64BitMode) {
-            Rebase = Config.Wow64GuestRebaseValue;
-          } else if (Config.NeedsWow64GuestRebase && CheckAddress < IR::WOW64_GUEST_ADDRESS_SPACE_SIZE) {
+          if (Config.NeedsWow64GuestRebase && CheckAddress < IR::WOW64_GUEST_ADDRESS_SPACE_SIZE) {
             Rebase = Config.Wow64GuestRebaseValue;
           }
           auto ExistingCodePtr = reinterpret_cast<uint8_t*>(CheckAddress + Rebase);

@@ -129,7 +129,7 @@ constexpr std::array<X86InstInfo[2], ENTRY_MAX> Primary_ArchSelect_LUT = {{
   },
   // ENTRY_9A
   {
-    {"CALLF",  TYPE_INST, FLAGS_NONE, 0, { .OpDispatch = nullptr } },
+    {"CALLF",  TYPE_INST, FLAGS_SETS_RIP | FLAGS_BLOCK_END | FLAGS_DEBUG_MEM_ACCESS, 6, { .OpDispatch = &IR::OpDispatchBuilder::CALLFARImmediateOp } },
     {"", TYPE_INVALID, FLAGS_NONE, 0, { .OpDispatch = nullptr } },
   },
   // ENTRY_A0
@@ -174,7 +174,7 @@ constexpr std::array<X86InstInfo[2], ENTRY_MAX> Primary_ArchSelect_LUT = {{
   },
   // ENTRY_EA
   {
-    {"JMPF",   TYPE_INST, FLAGS_NONE, 0, { .OpDispatch = nullptr } },
+    {"JMPF",   TYPE_INST, FLAGS_SETS_RIP | FLAGS_BLOCK_END, 6, { .OpDispatch = &IR::OpDispatchBuilder::JUMPFARImmediateOp } },
     {"", TYPE_INVALID, FLAGS_NONE, 0, { .OpDispatch = nullptr } },
   },
 }};

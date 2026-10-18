@@ -393,6 +393,8 @@ public:
   void JUMPFARIndirectOp(OpcodeArgs);
   void CALLFARIndirectOp(OpcodeArgs);
   void RETFARIndirectOp(OpcodeArgs);
+  void JUMPFARImmediateOp(OpcodeArgs);
+  void CALLFARImmediateOp(OpcodeArgs);
   void TESTOp(OpcodeArgs, uint32_t SrcIndex);
   void ARPLOp(OpcodeArgs);
   void MOVSXDOp(OpcodeArgs);
@@ -1255,21 +1257,15 @@ public:
     return Is64BitMode ? IR::OpSize::i64Bit : IR::OpSize::i32Bit;
   }
 
-  // See Addressing.h's WOW64_GUEST_REBASE/GuestRebaseInfo doc comments: sogen (the embedder) needs
-  // 32-bit guest memory dereferences rebased to a host address range that's actually mappable on
-  // Apple Silicon macOS (the low 4GB is permanently unmapped there) - unconditionally, since every
-  // 32-bit-mode address is inherently below that range already. A 64-bit-mode Context belonging to
-  // a wow64 process (CTX->Config.NeedsWow64GuestRebase - see its doc comment, public Context.h)
-  // also needs this, but only conditionally (its addresses aren't restricted to any range) - see
-  // GuestRebaseInfo::Conditional. An ordinary 64-bit-only Context needs no rebase at all.
+  // See Addressing.h's WOW64_GUEST_REBASE/GuestRebaseInfo doc comments: an embedder that cannot map
+  // the low 4GB (sogen on Apple Silicon macOS) opts in via CTX->Config.NeedsWow64GuestRebase to have
+  // sub-4GB dereferences rebased. Every 32-bit-mode address is inherently below 4GB, so the rebase is
+  // unconditional there; 64-bit-mode addresses need the runtime range check (GuestRebaseInfo::Conditional).
   IR::GuestRebaseInfo GuestMemoryRebase() const {
-    if (!Is64BitMode) {
-      return {.Rebase = CTX->Config.Wow64GuestRebaseValue, .Conditional = false};
+    if (!CTX->Config.NeedsWow64GuestRebase) {
+      return {};
     }
-    if (CTX->Config.NeedsWow64GuestRebase) {
-      return {.Rebase = CTX->Config.Wow64GuestRebaseValue, .Conditional = true};
-    }
-    return {};
+    return {.Rebase = CTX->Config.Wow64GuestRebaseValue, .Conditional = Is64BitMode};
   }
 
   // Applies WOW64_GUEST_REBASE to an already-computed guest memory address that is about to be
