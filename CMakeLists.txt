@@ -224,6 +224,11 @@ if (HAS_CLANG_PRESERVE_ALL)
   if (MINGW)
     message(STATUS "Ignoring broken clang::preserve_all support")
     set(HAS_CLANG_PRESERVE_ALL FALSE)
+  elseif (APPLE)
+    # Apple/upstream Clang 21+ can push a preserve_all callee-save offset past STP/LDP's
+    # 504-byte immediate range and silently wrap it negative, corrupting the saved fp/lr.
+    message(STATUS "Ignoring broken clang::preserve_all support")
+    set(HAS_CLANG_PRESERVE_ALL FALSE)
   else()
     message(STATUS "Has clang::preserve_all")
   endif()
