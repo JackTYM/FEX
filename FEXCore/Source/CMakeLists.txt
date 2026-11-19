@@ -330,5 +330,6 @@ if (NOT MINGW)
   target_include_directories(JemallocDummy PRIVATE "${PROJECT_SOURCE_DIR}/include/")
 endif()
 
-# The shared library should always link enabled jemalloc libraries
+# Both library flavours should always link enabled jemalloc libraries
+target_link_libraries(${PROJECT_NAME} PRIVATE JemallocLibs)
 target_link_libraries(${PROJECT_NAME}_shared PRIVATE JemallocLibs)
