@@ -858,7 +858,7 @@ void Arm64JITCore::EmitSuspendInterruptCheck() {
 #endif
 }
 
-void Arm64JITCore::EmitPolledStopCheck(uint64_t GuestRIP) {
+void Arm64JITCore::EmitPolledStopCheck(uint64_t GuestRIP, bool SpillSlotsReserved) {
   ARMEmitter::ForwardLabel l_NoStop;
   ldr(TMP1.W(), STATE_PTR(CpuStateFrame, StopRequestFlag));
   (void)cbz(ARMEmitter::Size::i32Bit, TMP1, &l_NoStop);
@@ -866,6 +866,9 @@ void Arm64JITCore::EmitPolledStopCheck(uint64_t GuestRIP) {
   InsertGuestRIPMove(TMP1, GuestRIP);
   str(TMP1, STATE_PTR(CpuStateFrame, State.rip));
 
+  if (SpillSlotsReserved) {
+    ResetStack();
+  }
   ldr(TMP1, STATE_PTR(CpuStateFrame, Pointers.ThreadStopHandlerSpillSRA));
   br(TMP1);
   (void)Bind(&l_NoStop);
@@ -879,7 +882,7 @@ void Arm64JITCore::EmitEntryPoint(ARMEmitter::BackwardLabel& HeaderLabel, bool C
 
   // Before the TF check and the spill slots: a stop here must not have changed any guest or stack state.
   if (CTX->Config.PolledStopCheck) {
-    EmitPolledStopCheck(BlockStartRIP);
+    EmitPolledStopCheck(BlockStartRIP, false);
   }
 
   if (CheckTF) {
@@ -1019,6 +1022,9 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
       if (PendingTargetLabel && PendingTargetLabel != Target) {
         if (PendingTargetLabel->Backward.Location) {
           EmitSuspendInterruptCheck();
+          if (CTX->Config.PolledStopCheck && PendingTargetLabelGuestRIP) {
+            EmitPolledStopCheck(*PendingTargetLabelGuestRIP, true);
+          }
         }
         b_OrRestart(PendingTargetLabel);
         PendingTargetLabel = nullptr;
@@ -1075,6 +1081,9 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
   if (PendingTargetLabel) {
     if (PendingTargetLabel->Backward.Location) {
       EmitSuspendInterruptCheck();
+      if (CTX->Config.PolledStopCheck && PendingTargetLabelGuestRIP) {
+        EmitPolledStopCheck(*PendingTargetLabelGuestRIP, true);
+      }
     }
     b_OrRestart(PendingTargetLabel);
   }
